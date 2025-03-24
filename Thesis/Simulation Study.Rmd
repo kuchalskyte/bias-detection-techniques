@@ -1,0 +1,738 @@
+---
+title: "Simulation Study"
+author: "Luka Kuchalskyte (s3983471)"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Simulating Societies
+
+The present research simulates a variety of societies under ten overarching umbrella seeds (referred to as `big_seeds`) to ensure that the proposed measures perform consistently across different initial conditions. Under each of these umbrella seeds, four distinct types of societies are simulated:
+ 
+1. Scarce + Linear (SL): Scarce undesired outcome with a linear relationship between Income and Outcome.
+2. Scarce + Non-linear (SN): Scarce undesired outcome with a non-linear relationship between Income and Outcome. 
+3. Non-scarce + Linear (NL): Non-scarce undesired outcome with a linear relationship between Income and Outcome.
+4. Non-scarce + Non-linear (NN): Non-scarce undesired outcome with a non-linear relationship between Income and Outcome.
+
+* **Scarcity** refers to how rare the undesired outcome (1) variable is within the population.
+* **Linearity** describes whether the relationship between Income and Outcome follows a linear or non-linear pattern.
+
+The purpose of the four society variations is to rigorously assess the robustness and quality of the bias detection methods under societies with differing compositions and characteristics.
+
+Within each of the four society types, two levels of bias are introduced:
+
+1. **Baseline Society**: Represents an unbiased scenario, where all coefficients are set to 0. This serves as a control group with no manually introduced bias.
+2. **10x10 Biased Societies**: A total of 100 biased societies are generated, each with unique combinations of the bias coefficients (b2 (red_coef) for the red colour effect and b3 (incout_coef) for the income-outcome effect). These coefficients range systematically from 0.1 to 1.0, creating a grid of bias compositions.
+
+This setup allows for evaluating how well the methods detect and measure bias across societies with varying levels of scarcity, linearity, and bias intensity.
+
+The functions below do the following:
+
+* `summarise_parameters`: This function summarizes all relevant parameters for each simulated society. It extracts and organizes the key coefficients, biases, and other characteristics, providing an overview of the input conditions and simulated outcomes.
+* `visualise_soc`: This function visualizes the relationship between Income and the Undesired Outcome (Outcome = 1). It enables a clear understanding of how Income influences the probability of experiencing the undesired outcome, revealing patterns such as linear or non-linear relationships, as well as any biases.
+* `soc_simulation`: This function simulates a single society. It takes a seed as input, ensuring reproducibility of results. The simulation incorporates various coefficients to generate the relationships between Income, Education, Colour, Disability, and the Outcome variable.
+* `simulate_societies`: This function simulates the baseline society (unbiased scenario) and 100 biased societies under a single overarching seed (big_seed). Each biased society is assigned a unique seed (unique_seed) to ensure variability in the compositions of Income, Education, Colour, and Disability while systematically introducing bias through specific coefficients.
+
+Important information:
+
+* **EDUCATION**: LOW = 0; HIGH = 1.
+* **COLOUR**: BLUE = 0; RED = 1.
+* **DISABILITY**: NO = 0; YES = 1.
+* **OUTCOME**: DESIRED = 0, UNDESIRED = 1.
+
+* `edu_coef`: Coefficient linking income to probability of high education (1). A positive coefficient indicates that an increase in income leads to a higher probability of obtaining high education (1).
+* `red_coef`: Coefficient linking income to probability of RED (1) - **Bias Coefficient**. A positive coefficient indicates that an increase in income leads to a higher probability of being categorized as red (1).
+* `incout_coef`: Coefficient linking income to probability of undesired outcome (1) - **Bias Coefficient**. A positive coefficient indicates that an increase in income leads to a higher probability of being categorized as having a desired outcome (0).
+  - The term `-adjusted_incomes` effectively reverses the relationship between income and the undesired outcome. A positive incout_coef means that as income increases, the value of incout_coef * (`-adjusted_incomes`) becomes more negative. This results in a decrease in the probability of the undesired outcome. In other words: Higher income means that one is *less likely* to experience the undesired outcome.
+* `eduout_coef`: Coefficient linking education to probability of undesired outcome (1). A positive coefficient indicates that an increase in education leads to a higher probability of being categorized as having a desired outcome (0).
+  - Similarly, the term `-education` reverses the relationship between education and the undesired outcome. A positive eduout_coef means that as education increases (e.g., moving from 0 to 1 for HIGH education), the value of eduout_coef * (`-education`) becomes more negative. This results in a decrease in the probability of the undesired outcome.
+
+```{r}
+# Function to summarise the simulation parameters in a table
+summarise_parameters <- function(edu_coef, red_coef, incout_coef, eduout_coef,
+                                 stochastic_sd, disability_rate, 
+                                 scarcity_factor, non_linear_degree, 
+                                 unique_seed, big_seed) {
+  
+  # In: edu_coef: Coefficient linking income to probability of high education (1);
+  #     red_coef: Coefficient linking income to probability of RED (1);
+  #     incout_coef: Coefficient linking income to probability of undesired outcome (1);
+  #     eduout_coef: Coefficient linking education to probability of undesired outcome (1);
+  #     stochastic_sd: Standard deviation for the normal distribution of noise in the model;
+  #     disability_rate: Probability of an individual having a disability (0 < disability_rate < 1);
+  #     scarcity_factor: Factor to adjust the probability of the undesired outcome (0 < scarcity_factor < 1);
+  #     non_linear_degree: For linearity of relationship between income and outcome;
+  #     unique_seed: The random seed used for the simulation;
+  #     big_seed: The big seed that controls the general simulation scenario.
+  # Out: A table summarizing the parameters in an APA-style format.
+  
+  # Load required package
+  library(knitr)
+  
+  # Add information to a data frame
+  params <- data.frame(
+    Parameter = c("Edu-Inc_Coef", "Red-Inc_Coef", "Inc-Out_Coef", "Edu-Out_Coef", 
+                  "Stochastic SD", "Disability Rate", "Scarcity Factor", 
+                  "Linearity Level", "Unique Seed", "Big Seed"),
+    
+    Value = c(edu_coef, red_coef, incout_coef, eduout_coef,
+              stochastic_sd, disability_rate, scarcity_factor,
+              non_linear_degree, unique_seed, big_seed))
+  
+  # Create an APA-style table
+  kable(params, format = "pandoc", caption = "Summary of Simulation Parameters", 
+        align = 'c', digits = 2)
+}
+```
+
+```{r}
+# Function to visualise the relationship between income and undesired outcome
+visualise_soc <- function(data) {
+  
+  # In: data: A data frame containing Income, Outcome, Colour, Disability and 
+  #             Education columns.
+  # Out: A scatter plot visualising the relationship between income and undesired outcome,
+  #       with points coloured by colour status (0 = BLUE, 1 = RED) and shaped by 
+  #       education level (0 = LOW, 1 = HIGH).
+  
+  # Load required package
+  library(ggplot2)
+  library(viridis)
+  
+  # Create the base plot
+  p <- ggplot(data, aes(x = Income, y = Outcome)) +
+    geom_point(aes(color = factor(Colour), shape = factor(Education)), size = 3, 
+               alpha = 0.6) +
+    theme_minimal() +
+    labs(title = "Relationship Between Income and Undesired Outcome",
+         x = "Income",
+         y = "Undesired Outcome (0 = Desired, 1 = Undesired)",
+         color = "Colour",
+         shape = "Education") +
+    
+    # Colour mapping for 0 (BLUE) and 1 (RED)
+    scale_color_viridis_d(option = "magma", labels = c("BLUE", "RED")) +
+    
+    # Shape mapping for 0 (LOW) and 1 (HIGH)
+    scale_shape_manual(values = c("0" = 16, "1" = 17), 
+                       labels = c("LOW", "HIGH")) +  # Circle for LOW, Triangle for HIGH
+
+    # Add a smooth curve to visualize the relationship
+    geom_smooth(method = "loess", se = FALSE, color = "black", linetype = "dashed")
+  
+  # Display the plot
+  return(p)
+}
+```
+
+```{r}
+# Function to simulate one society 
+soc_simulation <- function(n, shape = 7, rate = 4, min_income = 0, max_income = 100,
+                           edu_coef, red_coef, incout_coef, eduout_coef, 
+                           stochastic_sd = 0.1, disability_rate = 0.1, scarcity_factor, 
+                           unique_seed, big_seed, non_linear_degree) {
+  
+  # In: n: Number of data points to generate;
+  #     shape: Shape parameter of the gamma distribution. Higher values result in less skewness;
+  #            (default = 7)
+  #     rate: Rate parameter of the gamma distribution. Higher values result in a tighter distribution;
+  #           (default = 4)
+  #     min_income: Minimum income bound (default = 0);
+  #     max_income: Maximum income bound (default = 100);
+  #     edu_coef: Coefficient linking income to probability of high education (1);
+  #     red_coef: Coefficient linking income to probability of RED (1);
+  #     incout_coef: Coefficient linking income to probability of undesired outcome (1);
+  #     eduout_coef: Coefficient linking education to probability of undesired outcome (1);
+  #     stochastic_sd: Standard deviation for the normal distribution of noise in the model;
+  #                   (default = 0.1)
+  #     disability_rate: Probability of an individual having a disability (0 < disability_rate < 1);
+  #                      (default = 0.1)
+  #     scarcity_factor: Factor to adjust the probability of the undesired outcome (0 < scarcity_factor < 1);
+  #     unique_seed: The random seed used for the simulation;
+  #     big_seed: The big seed that controls the general simulation scenario;
+  #     non_linear_degree: The degree of linearity in the relationship between income and outcome.
+  # Out: A data frame containing the following columns:
+  #         - Income: Simulated income values;
+  #         - Education: Assigned education levels (0 = LOW, 1 = HIGH);
+  #         - Colour: Assigned colour (0 = BLUE, 1 = RED);
+  #         - Disability: Variable representing whether the individual 
+  #                   has a disability (0 = no disability, 1 = has disability);
+  #         - Outcome: Binary variable representing whether the individual 
+  #                   experienced the undesired outcome (0 = desired, 1 = undesired);
+  #     table: A table summarizing the parameters used in the simulation;
+  #     visualisation: A figure visualising the relationship between income and 
+  #             the undesired outcome, coloured by colour status and shaped by education level.
+  
+  # Set the unique seed
+  set.seed(unique_seed)
+  
+  # Generate incomes based on gamma distribution parameters
+  incomes <- rgamma(n, shape, rate)
+  
+  # Scale incomes to desired range [min_income, max_income]
+  incomes <- (incomes - min(incomes)) / (max(incomes) - min(incomes)) * 
+    (max_income - min_income) + min_income
+  
+  # Stochastic component (random noise)
+  epsilon <- rnorm(length(incomes), mean = 0, sd = stochastic_sd)
+  
+  # Standardize incomes
+  scaled_incomes <- (incomes - mean(incomes)) / sd(incomes)
+  
+  # Calculate the probability of high education (1) using logistic model
+  p_high_education <- 1 / (1 + exp(-(edu_coef * scaled_incomes + epsilon)))
+  
+  # Assign education based on sampling
+  education <- sapply(p_high_education, function(p) {
+    sample(c(0, 1), size = 1, prob = c(1 - p, p)) # 1 - p for 0 (LOW), p for 1 (HIGH)
+  })
+  
+  # Calculate the probability of being RED (1) using logistic model
+  p_red <- 1 / (1 + exp(-(red_coef * scaled_incomes + epsilon))) 
+  
+  # Assign colour based on sampling
+  colour <- sapply(p_red, function(p) {
+    sample(c(0, 1), size = 1, prob = c(1 - p, p))  # 1 - p for 0 (BLUE), p for 1 (RED)
+  })
+  
+  # Assign disability randomly
+  disability <- rbinom(n, size = 1, prob = disability_rate)
+  
+  # Scale incomes based on the non-linear degree
+  adjusted_incomes <- scaled_incomes^non_linear_degree
+  
+  # Adjust for scarcity using logit transformation
+  scarcity_factor <- pmax(pmin(scarcity_factor, 0.999), 0.001)
+  logit_p <- incout_coef * (-adjusted_incomes) + eduout_coef * (-education) + epsilon
+  logit_p <- logit_p + log(scarcity_factor / (1 - scarcity_factor))
+  
+  # Transform back to probability
+  p_undesired_outcome <- 1 / (1 + exp(-logit_p))
+  
+  # Ensure probabilities are capped between 0 and 1
+  p_undesired_outcome <- pmin(p_undesired_outcome, 1)
+  
+  # Assign undesired outcome based on sampling
+  undesired_outcome <- sapply(p_undesired_outcome, function(p) {
+    sample(c(0, 1), size = 1, prob = c(1 - p, p))  # 1 - p for 0 (desired), p for 1 (undesired)
+  })
+  
+  sim_soc <- data.frame(Income = incomes, Education = education, Colour = colour, 
+                        Disability = disability, Outcome = undesired_outcome)
+  
+  # Summarise parameters
+  params_table <- summarise_parameters(edu_coef, red_coef, incout_coef, eduout_coef,
+                                       stochastic_sd, disability_rate, scarcity_factor,
+                                       non_linear_degree, unique_seed, big_seed)
+  
+  # Visualise the income distribution based on outcomes
+  visualisation <- visualise_soc(sim_soc)
+  
+  # Return the data, table and visualisation
+  return(list(data = sim_soc,                  # Simulated society data frame
+              table = params_table,            # Table with society parameters
+              visualisation = visualisation))  # Visualisation of society
+}
+```
+
+```{r}
+# Function to simulate multiple societies ranging in their bias
+simulate_societies <- function(n, shape = 7, rate = 4, min_income = 0, max_income = 100,
+                               edu_coef = 0, eduout_coef = 0, stochastic_sd = 0.1, 
+                               disability_rate = 0.1, scarcity_factor, 
+                               big_seed, non_linear_degree) {
+  
+  # In: n: Number of data points to generate;
+  #     shape: Shape parameter of the gamma distribution. Higher values result in less skewness;
+  #            (default = 7)
+  #     rate: Rate parameter of the gamma distribution. Higher values result in a tighter distribution;
+  #           (default = 4)
+  #     min_income: Minimum income bound (default = 0);
+  #     max_income: Maximum income bound (default = 100);
+  #     edu_coef: Coefficient linking income to probability of high education (1);
+  #               (default = 0)
+  #     eduout_coef: Coefficient linking education to probability of undesired outcome (1);
+  #                  (default = 0)
+  #     stochastic_sd: Standard deviation for the normal distribution of noise in the model;
+  #                    (default = 0.1)
+  #     disability_rate: Probability of an individual having a disability (0 < disability_rate < 1);
+  #                      (default = 0.1)
+  #     scarcity_factor: Factor to adjust the probability of the undesired outcome (0 < scarcity_factor < 1);
+  #     big_seed: The big seed that controls the general simulation scenario;
+  #     non_linear_degree: The degree of linearity in the relationship between income and outcome.
+  # Out: A list of societies containing the following columns (with varying ranges in bias):
+  #         - Income: Simulated income values;
+  #         - Education: Assigned education levels (0 = LOW, 1 = HIGH);
+  #         - Colour: Assigned colour (0 = BLUE, 1 = RED);
+  #         - Disability: Variable representing whether the individual 
+  #                   has a disability (0 = no disability, 1 = has disability);
+  #         - Outcome: Binary variable representing whether the individual 
+  #                   experienced the undesired outcome (0 = desired, 1 = undesired);
+  
+  # Set the big seed for reproducibility (i.e. used to validate measures)
+  set.seed(big_seed)
+  
+  # Number of scenarios to simulate (baseline scenario + combinations of coefficients)
+  num_scenarios <- 1 + length(seq(0.1, 1.0, by = 0.1))^2  # Baseline + all combinations
+  unique_seeds <- sample(1:1e6, num_scenarios, replace = FALSE)  # Generate unique seeds for each society
+  
+  # Simulate the baseline society
+  baseline <- soc_simulation(n = n, shape = shape, rate = rate, 
+                             min_income = min_income, max_income = max_income,
+                             edu_coef = 0, red_coef = 0, incout_coef = 0, 
+                             eduout_coef = 0, stochastic_sd = stochastic_sd, 
+                             disability_rate = disability_rate, 
+                             scarcity_factor = scarcity_factor, 
+                             unique_seed = unique_seeds[1], big_seed = big_seed, 
+                             non_linear_degree = non_linear_degree)
+  
+  # Store the baseline society in a list
+  societies <- list()
+  societies[["baseline"]] <- baseline
+  
+  # Define different levels of bias for red_coef (b2) and incout_coef (b3)
+  b2_values <- seq(0.1, 1.0, by = 0.1)
+  b3_values <- seq(0.1, 1.0, by = 0.1)
+  seed_index <- 2  # Start indexing seeds for non-baseline societies
+  
+  # Iterate through all combinations of b2 (red_coef) and b3 (incout_coef)
+  for (red_coef in b2_values) {
+    for (incout_coef in b3_values) {
+      society <- soc_simulation(n = n, shape = shape, rate = rate, 
+                                min_income = min_income, max_income = max_income,
+                                edu_coef = edu_coef, red_coef = red_coef, 
+                                incout_coef = incout_coef, 
+                                eduout_coef = eduout_coef, 
+                                stochastic_sd = stochastic_sd, 
+                                disability_rate = disability_rate, 
+                                scarcity_factor = scarcity_factor, 
+                                unique_seed = unique_seeds[seed_index], 
+                                big_seed = big_seed, 
+                                non_linear_degree = non_linear_degree)
+      
+      # Name the society according to the coefficients used
+      society_name <- paste0("b2_", red_coef, "_b3_", incout_coef)
+      societies[[society_name]] <- society
+      seed_index <- seed_index + 1
+    }
+  }
+  
+  # Return the simulated societies in a list
+  return(societies)
+}
+```
+
+```{r}
+# Simulating 4 versions of societies with 20 different seeds. 
+## Each version x seed combination has 1 baseline society and 100 biased societies.
+set.seed(3983471) # Seed for reproducing results
+big_seeds <- sample(1:1e6, 20) 
+
+# Simulate scarce + linear societies
+societies_s_l_1 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[1], non_linear_degree = 1)
+
+societies_s_l_2 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[2], non_linear_degree = 1)
+
+societies_s_l_3 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[3], non_linear_degree = 1)
+
+societies_s_l_4 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[4], non_linear_degree = 1)
+
+societies_s_l_5 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[5], non_linear_degree = 1)
+
+societies_s_l_6 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[6], non_linear_degree = 1)
+
+societies_s_l_7 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[7], non_linear_degree = 1)
+
+societies_s_l_8 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[8], non_linear_degree = 1)
+
+societies_s_l_9 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[9], non_linear_degree = 1)
+
+societies_s_l_10 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[10], non_linear_degree = 1)
+
+societies_s_l_11 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[11], non_linear_degree = 1)
+
+societies_s_l_12 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[12], non_linear_degree = 1)
+
+societies_s_l_13 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[13], non_linear_degree = 1)
+
+societies_s_l_14 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[14], non_linear_degree = 1)
+
+societies_s_l_15 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[15], non_linear_degree = 1)
+
+societies_s_l_16 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[16], non_linear_degree = 1)
+
+societies_s_l_17 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[17], non_linear_degree = 1)
+
+societies_s_l_18 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[18], non_linear_degree = 1)
+
+societies_s_l_19 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[19], non_linear_degree = 1)
+
+societies_s_l_20 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[20], non_linear_degree = 1)
+
+# Simulate non-scarce + linear societies
+societies_n_l_1 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[1], non_linear_degree = 1)
+
+societies_n_l_2 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[2], non_linear_degree = 1)
+
+societies_n_l_3 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[3], non_linear_degree = 1)
+
+societies_n_l_4 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[4], non_linear_degree = 1)
+
+societies_n_l_5 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[5], non_linear_degree = 1)
+
+societies_n_l_6 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[6], non_linear_degree = 1)
+
+societies_n_l_7 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[7], non_linear_degree = 1)
+
+societies_n_l_8 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[8], non_linear_degree = 1)
+
+societies_n_l_9 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[9], non_linear_degree = 1)
+
+societies_n_l_10 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[10], non_linear_degree = 1)
+
+societies_n_l_11 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[11], non_linear_degree = 1)
+
+societies_n_l_12 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[12], non_linear_degree = 1)
+
+societies_n_l_13 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[13], non_linear_degree = 1)
+
+societies_n_l_14 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[14], non_linear_degree = 1)
+
+societies_n_l_15 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[15], non_linear_degree = 1)
+
+societies_n_l_16 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[16], non_linear_degree = 1)
+
+societies_n_l_17 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[17], non_linear_degree = 1)
+
+societies_n_l_18 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[18], non_linear_degree = 1)
+
+societies_n_l_19 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[19], non_linear_degree = 1)
+
+societies_n_l_20 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[20], non_linear_degree = 1)
+
+# Simulate scarce + non-linear societies
+societies_s_n_1 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[1], non_linear_degree = 2)
+
+societies_s_n_2 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[2], non_linear_degree = 2)
+
+societies_s_n_3 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[3], non_linear_degree = 2)
+
+societies_s_n_4 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[4], non_linear_degree = 2)
+
+societies_s_n_5 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[5], non_linear_degree = 2)
+
+societies_s_n_6 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[6], non_linear_degree = 2)
+
+societies_s_n_7 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[7], non_linear_degree = 2)
+
+societies_s_n_8 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[8], non_linear_degree = 2)
+
+societies_s_n_9 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[9], non_linear_degree = 2)
+
+societies_s_n_10 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[10], non_linear_degree = 2)
+
+societies_s_n_11 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[11], non_linear_degree = 2)
+
+societies_s_n_12 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[12], non_linear_degree = 2)
+
+societies_s_n_13 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[13], non_linear_degree = 2)
+
+societies_s_n_14 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[14], non_linear_degree = 2)
+
+societies_s_n_15 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[15], non_linear_degree = 2)
+
+societies_s_n_16 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[16], non_linear_degree = 2)
+
+societies_s_n_17 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[17], non_linear_degree = 2)
+
+societies_s_n_18 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[18], non_linear_degree = 2)
+
+societies_s_n_19 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[19], non_linear_degree = 2)
+
+societies_s_n_20 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.1, big_seed = big_seeds[20], non_linear_degree = 2)
+
+# Simulate non-scarce + non-linear societies
+societies_n_n_1 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[1], non_linear_degree = 2)
+
+societies_n_n_2 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[2], non_linear_degree = 2)
+
+societies_n_n_3 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[3], non_linear_degree = 2)
+
+societies_n_n_4 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[4], non_linear_degree = 2)
+
+societies_n_n_5 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[5], non_linear_degree = 2)
+
+societies_n_n_6 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[6], non_linear_degree = 2)
+
+societies_n_n_7 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[7], non_linear_degree = 2)
+
+societies_n_n_8 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[8], non_linear_degree = 2)
+
+societies_n_n_9 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[9], non_linear_degree = 2)
+
+societies_n_n_10 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[10], non_linear_degree = 2)
+
+societies_n_n_11 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[11], non_linear_degree = 2)
+
+societies_n_n_12 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[12], non_linear_degree = 2)
+
+societies_n_n_13 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[13], non_linear_degree = 2)
+
+societies_n_n_14 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[14], non_linear_degree = 2)
+
+societies_n_n_15 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[15], non_linear_degree = 2)
+
+societies_n_n_16 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[16], non_linear_degree = 2)
+
+societies_n_n_17 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[17], non_linear_degree = 2)
+
+societies_n_n_18 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[18], non_linear_degree = 2)
+
+societies_n_n_19 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[19], non_linear_degree = 2)
+
+societies_n_n_20 <- simulate_societies(
+  n = 5000, shape = 7, rate = 4, min_income = 0, max_income = 100,
+  edu_coef = 0.5, eduout_coef = 0.5, stochastic_sd = 0.1, disability_rate = 0.1, 
+  scarcity_factor = 0.5, big_seed = big_seeds[20], non_linear_degree = 2)
+```
