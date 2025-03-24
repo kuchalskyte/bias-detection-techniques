@@ -1,0 +1,691 @@
+---
+title: "Final Wasserstein Analysis"
+author: "Luka Kuchalskyte (s3983471)"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Wasserstein Analysis
+
+This bias detection method examines the distribution of positive and negative errors made by the algorithm across different demographic groups, specifically accounting for intersectionality between Colour and Disability. The underlying principle is that increasing bias results in growing dissimilarities in the error distributions across groups.
+
+To quantify these dissimilarities, the Wasserstein Distance is used to measure the divergence between the error distributions for all possible group combinations.
+
+The approach works as follows:
+
+1. *Model Training and Error Calculation*: A model is trained on the full dataset and used to generate predictions for all instances in the dataset. The errors are computed as the difference between the actual outcomes and the predicted values (Error = Outcome - Prediction). These errors are then separated into positive errors (over-predictions) and negative errors (under-predictions).
+2. *Error Distribution Analysis*: The error distributions for all cross-sections of the sensitive features (i.e., combinations of Colour and Disability) are visualised. Clear disparities in these distributions across demographic groups indicate potential bias. For instance, if certain groups consistently experience higher error rates or more extreme errors, it suggests the model may be performing inequitably across these groups.
+3. *Wasserstein Distance*: The Wasserstein Distance measures the minimal effort required to reconfigure the probability mass of one distribution to recover the other distribution (Panaretos & Zemel, 2018). This metric will provide a numerical value representing the (amount of) differences in the error distributions of varying demographic groups. The metric gives a single value that represents how "different" two distributions are, with a larger value indicating more disparity between the error distributions. 
+4. *Heatmap Representation*: The Wasserstein Distance is computed for all pairwise combinations of demographic groups. The average of these pairwise distances is calculated, and the results are presented in a heatmap. This visualization highlights the degree of dissimilarity in error distributions across groups and provides an intuitive way to assess the model's bias.
+
+```{r}
+# Function to visualise errors
+visualise_errors <- function(data, variable1 = "Colour", variable2 = "Disability", 
+                             pos_error, neg_error) {
+  
+  # In: data: A data frame containing the variables of interest;
+  #         - Income: Simulated income values;
+  #         - Education: Assigned education levels (0 = LOW, 1 = HIGH);
+  #         - Colour: Assigned colour (0 = BLUE, 1 = RED);
+  #         - Disability: Variable representing whether the individual 
+  #                   has a disability (0 = no disability, 1 = has disability);
+  #         - Outcome: Binary variable representing whether the individual 
+  #                   experienced the undesired outcome (0 = desired, 1 = undesired);
+  #     variable1: A string indicating the first categorical variable (default = "Colour");
+  #     variable2: A string indicating the second categorical variable (default = "Disability");
+  #     pos_error: A string indicating the name of the column for positive errors;
+  #     neg_error: A string indicating the name of the column for negative errors.
+  # Out: visualisations:
+  #       - Positive error distribution plot;
+  #       - Negative error distribution plot.
+  
+  # Load required package
+  library(ggplot2)
+  library(viridis)
+  
+  # Convert `variable1` to a categorical factor with appropriate labels
+  data[[variable1]] <- factor(data[[variable1]], levels = c(0, 1), 
+                              labels = c("BLUE", "RED"))
+  
+  # Convert `variable2` to a categorical factor with appropriate labels
+  data[[variable2]] <- factor(data[[variable2]], levels = c(0, 1), 
+                              labels = c("NO DIS", "YES DIS"))
+
+  # Initialise a list to store the plots
+  plot_list <- list()
+
+  # Filter data to remove rows where positive errors are missing
+  data_pos <- data[!is.na(data[[pos_error]]), ]
+
+  # Generate a density plot for positive errors
+  plot_list[["Positive Error"]] <- ggplot(data_pos, aes(x = .data[[pos_error]], fill = .data[[variable1]])) +
+    geom_density(alpha = 0.7, color = "black") +
+    facet_wrap(as.formula(paste("~", variable1, "+", variable2)), scales = "free") +
+    labs(title = paste("Positive Error Distribution by", variable1, "and", variable2), 
+         x = "Positive Error", y = "Density", fill = variable1) +
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Use "magma" for high contrast
+    theme_minimal()
+  
+  # Filter data to remove rows where negative errors are missing
+  data_neg <- data[!is.na(data[[neg_error]]), ]
+
+  # Generate a density plot for negative errors
+  plot_list[["Negative Error"]] <- ggplot(data_neg, aes(x = .data[[neg_error]], fill = .data[[variable1]])) +
+    geom_density(alpha = 0.7, color = "black") +
+    facet_wrap(as.formula(paste("~", variable1, "+", variable2)), scales = "free") +
+    labs(title = paste("Negative Error Distribution by", variable1, "and", variable2), 
+         x = "Negative Error", y = "Density", fill = variable1) +
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Use "magma" for high contrast
+    theme_minimal()
+  
+  # Return the list of ggplot objects containing the visualizations
+  return(plot_list)
+}
+```
+
+```{r}
+# Function to calculate Wasserstein distances
+calculate_wasserstein_distances <- function(data, variable1 = "Colour", 
+                                            variable2 = "Disability", 
+                                            error_column) {
+  
+  # In: data: A data frame containing the variables of interest;
+  #         - Income: Simulated income values;
+  #         - Education: Assigned education levels (0 = LOW, 1 = HIGH);
+  #         - Colour: Assigned colour (0 = BLUE, 1 = RED);
+  #         - Disability: Variable representing whether the individual 
+  #                   has a disability (0 = no disability, 1 = has disability);
+  #         - Outcome: Binary variable representing whether the individual 
+  #                   experienced the undesired outcome (0 = desired, 1 = undesired);
+  #    variable1: A string indicating the first categorical variable (default = "Colour");
+  #    variable2: A string indicating the second categorical variable (default = "Disability");
+  #    error_column: A string indicating the name of the column for the error values (e.g., "pos_error").
+  # Out: A list of Wasserstein distances between all demographic groups.
+
+  # Load required packages
+  library(dplyr)
+  library(transport)  # For wasserstein1d function
+  
+  # Create a dataframe to store the results
+  distances <- data.frame(Group1 = character(), Group2 = character(), 
+                          Distance = numeric(), stringsAsFactors = FALSE)
+  
+  # Define all group combinations
+  group_combinations <- list(
+    c("Red, No Disability", "Red, Yes Disability"),
+    c("Red, No Disability", "Blue, No Disability"),
+    c("Red, No Disability", "Blue, Yes Disability"),
+    c("Red, Yes Disability", "Blue, No Disability"),
+    c("Red, Yes Disability", "Blue, Yes Disability"),
+    c("Blue, No Disability", "Blue, Yes Disability")
+  )
+  
+  # Define corresponding filter conditions
+  group_conditions <- list(
+    list(c(1, 0), c(1, 1)),  # R1D0 vs R1D1
+    list(c(1, 0), c(0, 0)),  # R1D0 vs R0D0
+    list(c(1, 0), c(0, 1)),  # R1D0 vs R0D1
+    list(c(1, 1), c(0, 0)),  # R1D1 vs R0D0
+    list(c(1, 1), c(0, 1)),  # R1D1 vs R0D1
+    list(c(0, 0), c(0, 1))   # R0D0 vs R0D1
+  )
+  
+  # Loop through all pairs of group combinations
+  for (k in 1:length(group_combinations)) {
+    # Get the group labels
+    group1_label <- group_combinations[[k]][1]
+    group2_label <- group_combinations[[k]][2]
+    
+    # Get the filter conditions for both groups
+    group1_cond <- group_conditions[[k]][[1]]
+    group2_cond <- group_conditions[[k]][[2]]
+    
+    # Filter the data for each pair of groups
+    group1_data <- data %>% filter(!!sym(variable1) == group1_cond[1], 
+                                   !!sym(variable2) == group1_cond[2]) %>%
+      pull(!!sym(error_column)) %>% na.omit()
+    
+    group2_data <- data %>% filter(!!sym(variable1) == group2_cond[1], 
+                                   !!sym(variable2) == group2_cond[2]) %>%
+      pull(!!sym(error_column)) %>% na.omit()
+    
+    # Check if both groups have data
+    if (length(group1_data) > 0 & length(group2_data) > 0) {
+      
+      # Calculate the Wasserstein distance
+      distance <- wasserstein1d(group1_data, group2_data)
+      
+      # Add the result to the distances dataframe
+      distances <- rbind(distances, 
+                         data.frame(Group1 = group1_label,
+                                    Group2 = group2_label,
+                                    Distance = distance))
+    }
+  }
+  
+  # Return the dataframe of distances
+  return(distances)
+}
+```
+
+```{r}
+# Function to print the Wasserstein distances in APA-style table format
+print_apa_table_knit <- function(distances, error_type) {
+  
+  # In: distances: The distances calculated in `calculate_wasserstein_distances` function;
+  #     error_type: Positive or Negative.
+  # Out: Apa table of distances.
+  
+  # Load required package
+  library(knitr)
+  
+  # Format and print the table using kable with a caption (title)
+  distances %>%
+    kable(col.names = c("Group 1", "Group 2", "Wasserstein Distance"),
+          format = "pandoc", 
+          digits = 4,
+          align = c("l", "l", "r"),
+          caption = paste("Wasserstein Distances for", error_type, 
+                          "Error across Demographic Groups"))
+}
+```
+
+```{r}
+# Final Wasserstein Analysis function
+wasserstein_analysis <- function(data, formula = "Outcome ~ Income + Education", 
+                                 family = binomial, type = "response", 
+                                 response = "Outcome", variable1 = "Colour", 
+                                 variable2 = "Disability") {
+  
+  # In: data: The simulated society data;
+  #     formula: The model formula (default = "Outcome ~ Income + Education");
+  #     family: The family type for model (default = binomial);
+  #     type: The type of prediction (default = "response");
+  #     response: The outcome variable (default = "Outcome");
+  #     variable1: The first demographic variable (default = "Colour");
+  #     variable2: The second demographic variable (default = "Disability").
+  # Out: Wasserstein distances, Wasserstein distance means, visualisations, 
+  #       and APA-style tables for different errors.
+  
+  # Model building and predictions
+  model <- glm(formula = formula,
+               data = data,
+               family = family)
+  
+  pred <- predict(object = model,
+                  newdata = data,
+                  type = type)
+  
+  # Calculate positive errors: where the observed response exceeds the prediction
+  data$pos_error <- ifelse((data[[response]] - pred) >= 0, 
+                           (data[[response]] - pred), NA)
+  
+  # Calculate negative errors: where the observed response is less than the prediction
+  data$neg_error <- ifelse((data[[response]] - pred) < 0, 
+                           (data[[response]] - pred), NA)
+  
+  # Visualisations for error distributions
+  visualisations <- visualise_errors(data = data, variable1 = variable1, 
+                                     variable2 = variable2, 
+                                     pos_error = "pos_error",
+                                     neg_error = "neg_error")
+  
+  # Wasserstein distance calculations for different errors
+  distances_pos <- calculate_wasserstein_distances(data = data, 
+                                                   variable1 = variable1, 
+                                                   variable2 = variable2, 
+                                                   error_column = "pos_error")
+  
+  distances_neg <- calculate_wasserstein_distances(data = data, 
+                                                   variable1 = variable1, 
+                                                   variable2 = variable2, 
+                                                   error_column = "neg_error")
+  
+  # Format the results into tables in an APA-friendly format
+  apa_pos <- print_apa_table_knit(distances_pos, "Positive")
+  apa_neg <- print_apa_table_knit(distances_neg, "Negative")
+  
+  return(list(
+    distances_pos_mean = mean(distances_pos$Distance), # Mean of positive error distances
+    distances_neg_mean = mean(distances_neg$Distance), # Mean of negative error distances
+    pos_vis = visualisations[["Positive Error"]],      # Visualisation for positive errors
+    neg_vis = visualisations[["Negative Error"]],      # Visualisation for negative errors
+    distances_pos = apa_pos,                           # Positive APA table
+    distances_neg = apa_neg                            # Negative APA table
+  )) 
+}
+```
+
+```{r}
+# Method A (Wasserstein Analysis) Heatmap
+was_analysis_heat <- function(societies, formula = "Outcome ~ Income + Education") {
+  
+  # In: societies: List of societies to analyse;
+  #     formula: Model formula (default = "Outcome ~ Income + Education").
+  # Out: normalized_df: Data frame with the results of the Wasserstein analysis;
+  #      heatmap_pos: Heatmap visualization for normalized positive Wasserstein distances;
+  #      heatmap_neg: Heatmap visualization for normalized negative Wasserstein distances;
+  #      visualisations: List containing pos_vis and neg_vis visualisations.
+  
+  # Load required packages
+  library(reshape2)
+  library(ggplot2)
+  library(viridis)
+  
+  # Placeholder lists to store results and visualisations
+  results_list <- list()
+  visualisations_list <- list()  # To store visualisations for each society
+  
+  # Iterate through each society in the list
+  for (society_name in names(societies)) {
+    
+    # Extract society data
+    data <- societies[[society_name]]
+    
+    # Perform Wasserstein analysis for the current society
+    results <- wasserstein_analysis(data = data$data, formula = formula)
+    
+    # Store the results of the Wasserstein analysis
+    results_list[[society_name]] <- data.frame(
+      Society = society_name,                     # Society name
+      Pos_Mean = results$distances_pos_mean,      # Mean positive Wasserstein distance
+      Neg_Mean = results$distances_neg_mean)      # Mean negative Wasserstein distance
+    
+    # Store visualisations for each society
+    visualisations_list[[society_name]] <- list(
+      Pos_Vis = results$pos_vis,                  # Positive error visualisation
+      Neg_Vis = results$neg_vis)                  # Negative error visualisation
+  }
+  
+  # Combine results into a single data frame
+  results_df <- do.call(rbind, results_list)
+  rownames(results_df) <- NULL  # Reset row names
+  results_df <- results_df[, c("Society", "Pos_Mean", "Neg_Mean")]  # Ensure only necessary columns remain
+  
+  # Extract coefficients (b2, b3) from society names for heatmap axes
+  results_df$b2 <- ifelse(
+    results_df$Society == "baseline", 
+    0.0, 
+    as.numeric(sub("b2_([0-9.]+)_.*", "\\1", results_df$Society)))
+  
+  results_df$b3 <- ifelse(
+    results_df$Society == "baseline", 
+    0.0, 
+    as.numeric(sub(".*_b3_([0-9.]+)", "\\1", results_df$Society)))
+  
+  # Normalize the positive and negative Wasserstein distances
+  normalized_df <- results_df
+  normalized_df$Pos_Mean_Nrm <- with(normalized_df, 
+                                     (Pos_Mean - min(Pos_Mean)) / 
+                                       (max(Pos_Mean) - min(Pos_Mean)))
+  normalized_df$Neg_Mean_Nrm <- with(normalized_df, 
+                                     (Neg_Mean - min(Neg_Mean)) / 
+                                       (max(Neg_Mean) - min(Neg_Mean)))
+  
+  # Reshape the data for heatmap preparation
+  heatmap_data <- melt(normalized_df, id.vars = c("Society", "b2", "b3"), 
+                       measure.vars = c("Pos_Mean_Nrm", "Neg_Mean_Nrm"),
+                       variable.name = "Error_Type", value.name = "Normalized_Distance")
+  
+  # Split the data into subsets for positive and negative Wasserstein distances
+  pos_data <- subset(heatmap_data, Error_Type == "Pos_Mean_Nrm")
+  neg_data <- subset(heatmap_data, Error_Type == "Neg_Mean_Nrm")
+  
+  # Create heatmap for normalized positive Wasserstein distances
+  heatmap_pos <- ggplot(pos_data, aes(x = b2, y = b3, fill = Normalized_Distance)) +
+    geom_tile() +
+    scale_fill_viridis(option = "magma", name = "Normalized Wasserstein Distance") +
+    labs(title = "Normalized Heatmap of Positive Errors (Pos_Mean)", 
+         x = "Red ~ Income (β2)", 
+         y = "Outcome ~ Income (β3)") +
+    theme_minimal()
+  
+  # Create heatmap for normalized negative Wasserstein distances
+  heatmap_neg <- ggplot(neg_data, aes(x = b2, y = b3, fill = Normalized_Distance)) +
+    geom_tile() +
+    scale_fill_viridis(option = "magma", name = "Normalized Wasserstein Distance") +
+    labs(title = "Normalized Heatmap of Negative Errors (Neg_Mean)", 
+         x = "Red ~ Income (β2)", 
+         y = "Outcome ~ Income (β3)") +
+    theme_minimal()
+  
+  # Return the results, heatmaps, and visualisations
+  return(list(
+    normalized_df = normalized_df,       # Normalized Wasserstein distances
+    heatmap_pos = heatmap_pos,           # Heatmap for positive errors
+    heatmap_neg = heatmap_neg,           # Heatmap for negative errors
+    visualisations = visualisations_list # Visualisations for each society
+  ))
+}
+```
+
+## 2.1 Scarce + Linear
+
+```{r warning=FALSE}
+was_heat_sl1 <- was_analysis_heat(societies = societies_s_l_1)
+was_heat_sl2 <- was_analysis_heat(societies = societies_s_l_2)
+was_heat_sl3 <- was_analysis_heat(societies = societies_s_l_3)
+was_heat_sl4 <- was_analysis_heat(societies = societies_s_l_4)
+was_heat_sl5 <- was_analysis_heat(societies = societies_s_l_5)
+was_heat_sl6 <- was_analysis_heat(societies = societies_s_l_6)
+was_heat_sl7 <- was_analysis_heat(societies = societies_s_l_7)
+was_heat_sl8 <- was_analysis_heat(societies = societies_s_l_8)
+was_heat_sl9 <- was_analysis_heat(societies = societies_s_l_9)
+was_heat_sl10 <- was_analysis_heat(societies = societies_s_l_10)
+was_heat_sl11 <- was_analysis_heat(societies = societies_s_l_11)
+was_heat_sl12 <- was_analysis_heat(societies = societies_s_l_12)
+was_heat_sl13 <- was_analysis_heat(societies = societies_s_l_13)
+was_heat_sl14 <- was_analysis_heat(societies = societies_s_l_14)
+was_heat_sl15 <- was_analysis_heat(societies = societies_s_l_15)
+was_heat_sl16 <- was_analysis_heat(societies = societies_s_l_16)
+was_heat_sl17 <- was_analysis_heat(societies = societies_s_l_17)
+was_heat_sl18 <- was_analysis_heat(societies = societies_s_l_18)
+was_heat_sl19 <- was_analysis_heat(societies = societies_s_l_19)
+was_heat_sl20 <- was_analysis_heat(societies = societies_s_l_20)
+```
+
+## 2.2 Scarce + Non-linear
+
+```{r warning=FALSE}
+was_heat_sn1 <- was_analysis_heat(societies = societies_s_n_1)
+was_heat_sn2 <- was_analysis_heat(societies = societies_s_n_2)
+was_heat_sn3 <- was_analysis_heat(societies = societies_s_n_3)
+was_heat_sn4 <- was_analysis_heat(societies = societies_s_n_4)
+was_heat_sn5 <- was_analysis_heat(societies = societies_s_n_5)
+was_heat_sn6 <- was_analysis_heat(societies = societies_s_n_6)
+was_heat_sn7 <- was_analysis_heat(societies = societies_s_n_7)
+was_heat_sn8 <- was_analysis_heat(societies = societies_s_n_8)
+was_heat_sn9 <- was_analysis_heat(societies = societies_s_n_9)
+was_heat_sn10 <- was_analysis_heat(societies = societies_s_n_10)
+was_heat_sn11 <- was_analysis_heat(societies = societies_s_n_11)
+was_heat_sn12 <- was_analysis_heat(societies = societies_s_n_12)
+was_heat_sn13 <- was_analysis_heat(societies = societies_s_n_13)
+was_heat_sn14 <- was_analysis_heat(societies = societies_s_n_14)
+was_heat_sn15 <- was_analysis_heat(societies = societies_s_n_15)
+was_heat_sn16 <- was_analysis_heat(societies = societies_s_n_16)
+was_heat_sn17 <- was_analysis_heat(societies = societies_s_n_17)
+was_heat_sn18 <- was_analysis_heat(societies = societies_s_n_18)
+was_heat_sn19 <- was_analysis_heat(societies = societies_s_n_19)
+was_heat_sn20 <- was_analysis_heat(societies = societies_s_n_20)
+```
+
+## 2.3 Non-scarce + Linear
+
+```{r warning=FALSE}
+was_heat_nl1 <- was_analysis_heat(societies = societies_n_l_1)
+was_heat_nl2 <- was_analysis_heat(societies = societies_n_l_2)
+was_heat_nl3 <- was_analysis_heat(societies = societies_n_l_3)
+was_heat_nl4 <- was_analysis_heat(societies = societies_n_l_4)
+was_heat_nl5 <- was_analysis_heat(societies = societies_n_l_5)
+was_heat_nl6 <- was_analysis_heat(societies = societies_n_l_6)
+was_heat_nl7 <- was_analysis_heat(societies = societies_n_l_7)
+was_heat_nl8 <- was_analysis_heat(societies = societies_n_l_8)
+was_heat_nl9 <- was_analysis_heat(societies = societies_n_l_9)
+was_heat_nl10 <- was_analysis_heat(societies = societies_n_l_10)
+was_heat_nl11 <- was_analysis_heat(societies = societies_n_l_11)
+was_heat_nl12 <- was_analysis_heat(societies = societies_n_l_12)
+was_heat_nl13 <- was_analysis_heat(societies = societies_n_l_13)
+was_heat_nl14 <- was_analysis_heat(societies = societies_n_l_14)
+was_heat_nl15 <- was_analysis_heat(societies = societies_n_l_15)
+was_heat_nl16 <- was_analysis_heat(societies = societies_n_l_16)
+was_heat_nl17 <- was_analysis_heat(societies = societies_n_l_17)
+was_heat_nl18 <- was_analysis_heat(societies = societies_n_l_18)
+was_heat_nl19 <- was_analysis_heat(societies = societies_n_l_19)
+was_heat_nl20 <- was_analysis_heat(societies = societies_n_l_20)
+```
+
+## 2.4 Non-scarce + Non-linear
+
+```{r warning=FALSE}
+was_heat_nn1 <- was_analysis_heat(societies = societies_n_n_1)
+was_heat_nn2 <- was_analysis_heat(societies = societies_n_n_2)
+was_heat_nn3 <- was_analysis_heat(societies = societies_n_n_3)
+was_heat_nn4 <- was_analysis_heat(societies = societies_n_n_4)
+was_heat_nn5 <- was_analysis_heat(societies = societies_n_n_5)
+was_heat_nn6 <- was_analysis_heat(societies = societies_n_n_6)
+was_heat_nn7 <- was_analysis_heat(societies = societies_n_n_7)
+was_heat_nn8 <- was_analysis_heat(societies = societies_n_n_8)
+was_heat_nn9 <- was_analysis_heat(societies = societies_n_n_9)
+was_heat_nn10 <- was_analysis_heat(societies = societies_n_n_10)
+was_heat_nn11 <- was_analysis_heat(societies = societies_n_n_11)
+was_heat_nn12 <- was_analysis_heat(societies = societies_n_n_12)
+was_heat_nn13 <- was_analysis_heat(societies = societies_n_n_13)
+was_heat_nn14 <- was_analysis_heat(societies = societies_n_n_14)
+was_heat_nn15 <- was_analysis_heat(societies = societies_n_n_15)
+was_heat_nn16 <- was_analysis_heat(societies = societies_n_n_16)
+was_heat_nn17 <- was_analysis_heat(societies = societies_n_n_17)
+was_heat_nn18 <- was_analysis_heat(societies = societies_n_n_18)
+was_heat_nn19 <- was_analysis_heat(societies = societies_n_n_19)
+was_heat_nn20 <- was_analysis_heat(societies = societies_n_n_20)
+```
+
+# 3. Correlations
+
+To evaluate the effectiveness of the methods in detecting bias, the correlations between the normalized results and the increasing values of b2, b3, and their product (b2 * b3) are calculated. These correlations serve as a measure of how well each method captures the growing bias as these coefficients increase.
+
+The process is as follows:
+
+1. **Correlation with b2**: For each value of b2 (ranging from 0.1 to 1.0), the function calculates the average normalized Wasserstein Distance across all values of b3. This average is then correlated with the values of b2 to assess how strongly the target metric varies with b2.
+2. **Correlation with b3**: Similarly, for each value of b3 (ranging from 0.1 to 1.0), the function calculates the average normalized Wasserstein Distance across all values of b2. This average is then correlated with the values of b3.
+3. **Correlation with b2 x b3**: The product of b2 and b3 is computed for all data points. The normalized Wasserstein Distance is then correlated with this product to measure the combined influence of b2 and b3 on the metric.
+
+The results include all three correlations (b2, b3, and b2 * b3) for the specified dataset, providing a comprehensive view of the relationship between the coefficients and the normalized results. This helps in comparing the performance of different bias detection methods.
+
+The results will then be compared across all three methods to determine their relative performance in detecting bias.
+
+```{r}
+calculate_correlations <- function(data, b2_col, b3_col, measure_col, 
+                                   dataset_name) {
+  
+  # In: data: Normalized Wasserstein Distance data frame;
+  #     b2_col: A string specifying the column name representing the first variable (e.g., "b2");
+  #     b3_col: A string specifying the column name representing the second variable (e.g., "b3");
+  #     measure_col: A string specifying the target or measurement column (e.g., "Pos_Mean_Nrm");
+  #     dataset_name: A string representing the name of your dataset (e.g., "nl1").
+  # Out: A tibble consisting of:
+  #         - dataset: The provided dataset name.
+  #         - cor_b2: Correlation between the average values of b2_col and measure_col.
+  #         - cor_b3: Correlation between the average values of b3_col and measure_col.
+  #         - cor_b2_b3: Correlation between the product of b2_col and b3_col and measure_col.
+  
+  # Load necessary package
+  library(dplyr)
+  
+  # Calculate average measure per group for b2_col
+  avg_b3 <- data %>%
+    group_by(!!sym(b2_col)) %>% # Group by b2 coefficient
+    summarize(avg_measure_b3 = mean(!!sym(measure_col), na.rm = TRUE), .groups = 'drop')
+
+  # Calculate correlation between b2 and measure_col
+  cor_b2 <- cor(avg_b3[[b2_col]], avg_b3$avg_measure_b3, use = "complete.obs")
+
+  # Calculate average measure per group for b3_col 
+  avg_b2 <- data %>%
+    group_by(!!sym(b3_col)) %>% # Group by b3 coefficient
+    summarize(avg_measure_b2 = mean(!!sym(measure_col), na.rm = TRUE), .groups = 'drop')
+
+  # Calculate correlation between b3 and measure_col
+  cor_b3 <- cor(avg_b2[[b3_col]], avg_b2$avg_measure_b2, use = "complete.obs")
+
+  # Compute product of b2 and b3, then calculate its correlation with measure_col
+  data <- data %>%
+    mutate(b2_b3 = !!sym(b2_col) * !!sym(b3_col))
+
+  cor_b2_b3 <- cor(data$b2_b3, data[[measure_col]], use = "complete.obs")
+
+  # Return results as a data frame
+  correlation_results <- data.frame(
+    dataset = dataset_name,   # Dataset name for reference
+    cor_b2 = cor_b2,          # Correlation between b2 and measure_col
+    cor_b3 = cor_b3,          # Correlation between b3 and measure_col
+    cor_b2_b3 = cor_b2_b3,    # Correlation between b2*b3 and measure_col
+    stringsAsFactors = FALSE  # To ensure character columns don't become factors
+  )
+}
+```
+
+```{r}
+# Load required package
+library(purrr)
+
+# List of datasets with names
+datasets <- list(
+  sl1 = was_heat_sl1$normalized_df,
+  sl2 = was_heat_sl2$normalized_df,
+  sl3 = was_heat_sl3$normalized_df,
+  sl4 = was_heat_sl4$normalized_df,
+  sl5 = was_heat_sl5$normalized_df,
+  sl6 = was_heat_sl6$normalized_df,
+  sl7 = was_heat_sl7$normalized_df,
+  sl8 = was_heat_sl8$normalized_df,
+  sl9 = was_heat_sl9$normalized_df,
+  sl10 = was_heat_sl10$normalized_df,
+  sl11 = was_heat_sl11$normalized_df,
+  sl12 = was_heat_sl12$normalized_df,
+  sl13 = was_heat_sl13$normalized_df,
+  sl14 = was_heat_sl14$normalized_df,
+  sl15 = was_heat_sl15$normalized_df,
+  sl16 = was_heat_sl16$normalized_df,
+  sl17 = was_heat_sl17$normalized_df,
+  sl18 = was_heat_sl18$normalized_df,
+  sl19 = was_heat_sl19$normalized_df,
+  sl20 = was_heat_sl20$normalized_df,
+  sn1 = was_heat_sn1$normalized_df,
+  sn2 = was_heat_sn2$normalized_df,
+  sn3 = was_heat_sn3$normalized_df,
+  sn4 = was_heat_sn4$normalized_df,
+  sn5 = was_heat_sn5$normalized_df,
+  sn6 = was_heat_sn6$normalized_df,
+  sn7 = was_heat_sn7$normalized_df,
+  sn8 = was_heat_sn8$normalized_df,
+  sn9 = was_heat_sn9$normalized_df,
+  sn10 = was_heat_sn10$normalized_df,
+  sn11 = was_heat_sn11$normalized_df,
+  sn12 = was_heat_sn12$normalized_df,
+  sn13 = was_heat_sn13$normalized_df,
+  sn14 = was_heat_sn14$normalized_df,
+  sn15 = was_heat_sn15$normalized_df,
+  sn16 = was_heat_sn16$normalized_df,
+  sn17 = was_heat_sn17$normalized_df,
+  sn18 = was_heat_sn18$normalized_df,
+  sn19 = was_heat_sn19$normalized_df,
+  sn20 = was_heat_sn20$normalized_df,
+  nl1 = was_heat_nl1$normalized_df,
+  nl2 = was_heat_nl2$normalized_df,
+  nl3 = was_heat_nl3$normalized_df,
+  nl4 = was_heat_nl4$normalized_df,
+  nl5 = was_heat_nl5$normalized_df,
+  nl6 = was_heat_nl6$normalized_df,
+  nl7 = was_heat_nl7$normalized_df,
+  nl8 = was_heat_nl8$normalized_df,
+  nl9 = was_heat_nl9$normalized_df,
+  nl10 = was_heat_nl10$normalized_df,
+  nl11 = was_heat_nl11$normalized_df,
+  nl12 = was_heat_nl12$normalized_df,
+  nl13 = was_heat_nl13$normalized_df,
+  nl14 = was_heat_nl14$normalized_df,
+  nl15 = was_heat_nl15$normalized_df,
+  nl16 = was_heat_nl16$normalized_df,
+  nl17 = was_heat_nl17$normalized_df,
+  nl18 = was_heat_nl18$normalized_df,
+  nl19 = was_heat_nl19$normalized_df,
+  nl20 = was_heat_nl20$normalized_df,
+  nn1 = was_heat_nn1$normalized_df,
+  nn2 = was_heat_nn2$normalized_df,
+  nn3 = was_heat_nn3$normalized_df,
+  nn4 = was_heat_nn4$normalized_df,
+  nn5 = was_heat_nn5$normalized_df,
+  nn6 = was_heat_nn6$normalized_df,
+  nn7 = was_heat_nn7$normalized_df,
+  nn8 = was_heat_nn8$normalized_df,
+  nn9 = was_heat_nn9$normalized_df,
+  nn10 = was_heat_nn10$normalized_df,
+  nn11 = was_heat_nn11$normalized_df,
+  nn12 = was_heat_nn12$normalized_df,
+  nn13 = was_heat_nn13$normalized_df,
+  nn14 = was_heat_nn14$normalized_df,
+  nn15 = was_heat_nn15$normalized_df,
+  nn16 = was_heat_nn16$normalized_df,
+  nn17 = was_heat_nn17$normalized_df,
+  nn18 = was_heat_nn18$normalized_df,
+  nn19 = was_heat_nn19$normalized_df,
+  nn20 = was_heat_nn20$normalized_df
+  )
+
+# Function to calculate correlations across datasets
+calculate_results <- function(datasets, measure_col) {
+  map2(datasets, names(datasets), ~ calculate_correlations(.x, "b2", "b3", measure_col, .y)) %>%
+    bind_rows()
+  }
+
+# Calculate positive correlations
+results_pos <- calculate_results(datasets, "Pos_Mean_Nrm")
+print(results_pos)
+
+# Calculate negative correlations
+results_neg <- calculate_results(datasets, "Neg_Mean_Nrm")
+print(results_neg)
+```
+
+Following this, the average correlations are computed. This is done by transforming the correlations into Fisher Z scores, taking the average of those and then transforming it back into a correlation.
+
+```{r}
+# Calculate average correlations
+calculate_avg_correlations <- function(results_df) {
+  
+  # In: results_df:A dataframe containing the following columns:
+  #         - dataset: A string representing the dataset name.
+  #         - cor_b2: Correlation between b2 and measure_col.
+  #         - cor_b3: Correlation between b3 and measure_col.
+  #         - cor_b2_b3: Correlation between the product of b2 and b3 and measure_col.
+  # Out: dataset: An abbreviated dataset name (the first two characters of the dataset).
+  #      avg_cor_b2: The Fisher-Z inverse transformed average correlation between b2 and measure_col.
+  #      avg_cor_b3: The Fisher-Z inverse transformed average correlation between b3 and measure_col.
+  #      avg_cor_b2_b3: The Fisher-Z inverse transformed average correlation between the product of b2 and b3 and measure_col.
+  
+  # Load necessary packages
+  library(DescTools)
+  library(dplyr)
+  
+  # Transform dataset names to abbreviated form (first 2 characters)
+  results_df %>%
+    # Apply Fisher-Z transformation to correlations
+    mutate(
+      fisher_z_b2_to_avg_b3 = FisherZ(cor_b2),
+      fisher_z_b3_to_avg_b2 = FisherZ(cor_b3),
+      fisher_z_b2_b3_to_measure = FisherZ(cor_b2_b3)
+    ) %>%
+    # Group by abbreviated dataset name (first 2 characters)
+    group_by(dataset = substr(dataset, 1, 2)) %>%
+    summarize(
+      avg_fisher_z_b2_to_avg_b3 = mean(fisher_z_b2_to_avg_b3, na.rm = TRUE),
+      avg_fisher_z_b3_to_avg_b2 = mean(fisher_z_b3_to_avg_b2, na.rm = TRUE),
+      avg_fisher_z_b2_b3_to_measure = mean(fisher_z_b2_b3_to_measure, na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    # Apply Fisher-Z inverse transformation back to correlation scale
+    mutate(
+      avg_cor_b2 = FisherZInv(avg_fisher_z_b2_to_avg_b3),
+      avg_cor_b3 = FisherZInv(avg_fisher_z_b3_to_avg_b2),
+      avg_cor_b2_b3 = FisherZInv(avg_fisher_z_b2_b3_to_measure)
+    ) %>%
+    # Select relevant columns
+    select(dataset, avg_cor_b2, avg_cor_b3, avg_cor_b2_b3)
+}
+```
+
+```{r}
+# Calculate average correlations for Pos_Mean_Nrm
+avg_results_pos <- calculate_avg_correlations(results_pos)
+
+# Calculate average correlations for Neg_Mean_Nrm
+avg_results_neg <- calculate_avg_correlations(results_neg)
+
+# Print results
+print(avg_results_pos)
+print(avg_results_neg)
+```
