@@ -1,0 +1,267 @@
+---
+title: "Generalised Technique A - Wasserstein Analysis"
+author: "Luka Kuchalskyte (s3983471)"
+date: '`r Sys.Date()`'
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 2. Wasserstein Analysis
+
+This bias detection method examines the distribution of positive and negative errors made by the algorithm across different demographic groups, specifically accounting for intersectionality between Colour and Disability. The underlying principle is that increasing bias results in growing dissimilarities in the error distributions across groups.
+
+To quantify these dissimilarities, the Wasserstein Distance is used to measure the divergence between the error distributions for all possible group combinations.
+
+The approach works as follows:
+
+1. *Model Training and Error Calculation*: A model is trained on the full dataset and used to generate predictions for all instances in the dataset. The errors are computed as the difference between the actual outcomes and the predicted values (Error = Outcome - Prediction). These errors are then separated into positive errors (over-predictions) and negative errors (under-predictions).
+2. *Error Distribution Analysis*: The error distributions for all cross-sections of the sensitive features (i.e., combinations of Colour and Disability) are visualised. Clear disparities in these distributions across demographic groups indicate potential bias. For instance, if certain groups consistently experience higher error rates or more extreme errors, it suggests the model may be performing inequitably across these groups.
+3. *Wasserstein Distance*: The Wasserstein Distance measures the minimal effort required to reconfigure the probability mass of one distribution to recover the other distribution (Panaretos & Zemel, 2018). This metric will provide a numerical value representing the (amount of) differences in the error distributions of varying demographic groups. The metric gives a single value that represents how "different" two distributions are, with a larger value indicating more disparity between the error distributions. 
+4. *Heatmap Representation*: The Wasserstein Distance is computed for all pairwise combinations of demographic groups. The average of these pairwise distances is calculated, and the results are presented in a heatmap. This visualization highlights the degree of dissimilarity in error distributions across groups and provides an intuitive way to assess the model's bias.
+
+```{r}
+# Function to visualise errors
+visualise_errors <- function(data, variable1, variable2,
+                             levels1, levels2,
+                             labels1, labels2,
+                             pos_error, neg_error) {
+  
+  # In: data: A data frame containing the variables of interest;
+  #     variable1: A string indicating the first sensitive variable;
+  #     variable2: A string indicating the second sensitive variable;
+  #     levels1: A vector that defines the possible values (categories) for variable1. 
+  #              It ensures that factor() assigns the correct labels even if some levels are missing from the dataset;
+  #     levels2: A vector that defines the possible values (categories) for variable2. 
+  #              It ensures that factor() assigns the correct labels even if some levels are missing from the dataset;
+  #     labels1: A vector of type character for sensitive variable 1 (e.g. c("Male", "Female"));
+  #     labels2: A vector of type character for sensitive variable 1 (e.g. c("Black", "White"));
+  #     pos_error: A string indicating the name of the column for positive errors;
+  #     neg_error: A string indicating the name of the column for negative errors.
+  # Out: visualisations:
+  #       - Positive error distribution plot;
+  #       - Negative error distribution plot.
+  
+  # Load required package
+  library(ggplot2)
+  library(viridis)
+  
+  # Convert `variable1` to a categorical factor with appropriate labels
+  data[[variable1]] <- factor(data[[variable1]], levels = levels1, 
+                              labels = labels1)
+  
+  # Convert `variable2` to a categorical factor with appropriate labels
+  data[[variable2]] <- factor(data[[variable2]], levels = levels2, 
+                              labels = labels2)
+
+  # Initialise a list to store the plots
+  plot_list <- list()
+
+  # Filter data to remove rows where positive errors are missing
+  data_pos <- data[!is.na(data[[pos_error]]), ]
+
+  # Generate a density plot for positive errors
+  plot_list[["Positive Error"]] <- ggplot(data_pos, aes(x = .data[[pos_error]], fill = .data[[variable1]])) +
+    geom_density(alpha = 0.7, color = "black") +
+    facet_wrap(as.formula(paste("~", variable1, "+", variable2)), scales = "free") +
+    labs(title = paste("Positive Error Distribution by", variable1, "and", variable2), 
+         x = "Positive Error", y = "Density", fill = variable1) +
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Use "magma" for high contrast
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, size = 14),  # Center and style title
+          axis.title.x = element_text(size = 12),
+          axis.title.y = element_text(size = 12),
+          axis.text.x = element_text(size = 8),
+          axis.text.y = element_text(size = 8),
+          legend.title = element_blank())
+  
+  # Filter data to remove rows where negative errors are missing
+  data_neg <- data[!is.na(data[[neg_error]]), ]
+
+  # Generate a density plot for negative errors
+  plot_list[["Negative Error"]] <- ggplot(data_neg, aes(x = .data[[neg_error]], fill = .data[[variable1]])) +
+    geom_density(alpha = 0.7, color = "black") +
+    facet_wrap(as.formula(paste("~", variable1, "+", variable2)), scales = "free") +
+    labs(title = paste("Negative Error Distribution by", variable1, "and", variable2), 
+         x = "Negative Error", y = "Density", fill = variable1) +
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Consistent color palette
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, size = 14),  # Center and style title
+          axis.title.x = element_text(size = 12),
+          axis.title.y = element_text(size = 12),
+          axis.text.x = element_text(size = 8),
+          axis.text.y = element_text(size = 8),
+          legend.title = element_blank())
+  
+  # Return the list of ggplot objects containing the visualizations
+  return(plot_list)
+}
+```
+
+```{r}
+# Function to calculate Wasserstein distances
+calculate_wasserstein_distances <- function(data, variable1, variable2, 
+                                            group_combinations, group_conditions, 
+                                            error_column) {
+  
+  # In: data: A data frame containing the variables of interest;
+  #    variable1: A string indicating the first sensitive variable;
+  #    variable2: A string indicating the second sensitive variable;
+  #    group_combinations: A list of group label combinations to compare;
+  #    group_conditions: A list of conditions for filtering the data for each group combination;
+  #    error_column: A string indicating the name of the column for the error values (e.g., "pos_error").
+  # Out: A list of Wasserstein distances between all demographic groups.
+
+  # Load required packages
+  library(dplyr)
+  library(transport)  # For wasserstein1d function
+  
+  # Create a dataframe to store the results
+  distances <- data.frame(Group1 = character(), Group2 = character(), 
+                          Distance = numeric(), stringsAsFactors = FALSE)
+  
+  # Loop through all pairs of group combinations
+  for (k in 1:length(group_combinations)) {
+    # Get the group labels
+    group1_label <- group_combinations[[k]][1]
+    group2_label <- group_combinations[[k]][2]
+    
+    # Get the filter conditions for both groups
+    group1_cond <- group_conditions[[k]][[1]]
+    group2_cond <- group_conditions[[k]][[2]]
+    
+    # Filter the data for each pair of groups
+    group1_data <- data %>% filter(!!sym(variable1) == group1_cond[1], 
+                                   !!sym(variable2) == group1_cond[2]) %>%
+      pull(!!sym(error_column)) %>% na.omit()
+    
+    group2_data <- data %>% filter(!!sym(variable1) == group2_cond[1], 
+                                   !!sym(variable2) == group2_cond[2]) %>%
+      pull(!!sym(error_column)) %>% na.omit()
+    
+    # Check if both groups have data
+    if (length(group1_data) > 0 & length(group2_data) > 0) {
+      
+      # Calculate the Wasserstein distance
+      distance <- wasserstein1d(group1_data, group2_data)
+      
+      # Add the result to the distances dataframe
+      distances <- rbind(distances, 
+                         data.frame(Group1 = group1_label,
+                                    Group2 = group2_label,
+                                    Distance = distance))
+    }
+  }
+  
+  # Return the dataframe of distances
+  return(distances)
+}
+```
+
+```{r}
+# Function to print the Wasserstein distances in APA-style table format
+print_apa_table_knit <- function(distances, error_type) {
+  
+  # In: distances: The distances calculated in `calculate_wasserstein_distances` function;
+  #     error_type: Positive or Negative.
+  # Out: Apa table of distances.
+  
+  # Load required package
+  library(knitr)
+  
+  # Format and print the table using kable with a caption (title)
+  distances %>%
+    kable(col.names = c("Group 1", "Group 2", "Wasserstein Distance"),
+          format = "pandoc", 
+          digits = 4,
+          align = c("l", "l", "r"),
+          caption = paste("Wasserstein Distances for", error_type, 
+                          "Error across Demographic Groups"))
+}
+```
+
+```{r}
+# Final Wasserstein Analysis function
+wasserstein_analysis <- function(data, formula, 
+                                 family = binomial, type = "response", 
+                                 levels1, levels2,
+                                 labels1, labels2,
+                                 group_combinations,
+                                 group_conditions, 
+                                 response, variable1, 
+                                 variable2) {
+  
+  # In: data: The simulated society data;
+  #     formula: The model formula;
+  #     family: The family type for model (default = binomial);
+  #     levels1: A vector that defines the possible values (categories) for variable1. 
+  #              It ensures that factor() assigns the correct labels even if some levels are missing from the dataset;
+  #     levels2: A vector that defines the possible values (categories) for variable2.
+  #              It ensures that factor() assigns the correct labels even if some levels are missing from the dataset;
+  #     labels1: A vector of type character for sensitive variable 1 (e.g. c("Male", "Female"));
+  #     labels2: A vector of type character for sensitive variable 1 (e.g. c("Black", "White"));
+  #     group_combinations: A list of group label combinations to compare;
+  #     group_conditions: A list of conditions for filtering the data for each group combination;
+  #     type: The type of prediction (default = "response");
+  #     response: The outcome variable;
+  #     variable1: The first demographic variable;
+  #     variable2: The second demographic variable.
+  # Out: Wasserstein distances, Wasserstein distance means, visualisations, 
+  #       and APA-style tables for different errors.
+  
+  # Model building and predictions
+  model <- glm(formula = formula,
+               data = data,
+               family = family)
+  
+  pred <- predict(object = model,
+                  newdata = data,
+                  type = type)
+  
+  # Calculate positive errors: where the observed response exceeds the prediction
+  data$pos_error <- ifelse((data[[response]] - pred) >= 0, 
+                           (data[[response]] - pred), NA)
+  
+  # Calculate negative errors: where the observed response is less than the prediction
+  data$neg_error <- ifelse((data[[response]] - pred) < 0, 
+                           (data[[response]] - pred), NA)
+  
+  # Visualisations for error distributions
+  visualisations <- visualise_errors(data = data, variable1 = variable1, 
+                                     variable2 = variable2,
+                                     levels1 = levels1, levels2 = levels2,
+                                     labels1 = labels1, labels2 = labels2,
+                                     pos_error = "pos_error",
+                                     neg_error = "neg_error")
+  
+  # Wasserstein distance calculations for different errors
+  distances_pos <- calculate_wasserstein_distances(data = data, 
+                                                   variable1 = variable1, 
+                                                   variable2 = variable2, 
+                                                   group_combinations = group_combinations, 
+                                                   group_conditions = group_conditions, 
+                                                   error_column = "pos_error")
+  
+  distances_neg <- calculate_wasserstein_distances(data = data, 
+                                                   variable1 = variable1, 
+                                                   variable2 = variable2,
+                                                   group_combinations = group_combinations, 
+                                                   group_conditions = group_conditions, 
+                                                   error_column = "neg_error")
+  
+  # Format the results into tables in an APA-friendly format
+  apa_pos <- print_apa_table_knit(distances_pos, "Positive")
+  apa_neg <- print_apa_table_knit(distances_neg, "Negative")
+  
+  return(list(
+    distances_pos_mean = mean(distances_pos$Distance), # Mean of positive error distances
+    distances_neg_mean = mean(distances_neg$Distance), # Mean of negative error distances
+    pos_vis = visualisations[["Positive Error"]],      # Visualisation for positive errors
+    neg_vis = visualisations[["Negative Error"]],      # Visualisation for negative errors
+    distances_pos = apa_pos,                           # Positive APA table
+    distances_neg = apa_neg                            # Negative APA table
+  )) 
+}
+```
