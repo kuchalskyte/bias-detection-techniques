@@ -1,19 +1,25 @@
-This folder contains code used in my thesis study:
+# Thesis Study - Code Documentation
+
+This folder contains all the code necessary to replicate the analysis conducted in my thesis study. The workflow consists of two main parts: the Simulation Study, which generates the synthetic societies, and the Technique Workbooks, which apply different bias detection techniques to the simulated data.
 
 ## 1. Simulation Study
-* This workbook includes all code necessary to replicate the societies assessed in my thesis.
-* This workbook needs to be run first, in order to run the remaining workbooks in this Folder.
+* This workbook contains all the code required to generate the societies analyzed in the thesis.
+* It must be run first before executing any of the technique workbooks.
+* Running this workbook will generate the necessary datasets that the subsequent workbooks depend on.
 
 ## 2. Technique Workbooks
-A workbook is dedicated to each technique seperately. The technique workbooks can only be run once the Simulation Study workbook is run.
+Each technique is implemented in a separate workbook. These workbooks rely on the datasets produced by the Simulation Study and should only be run after the Simulation Study workbook has been executed.
 
-### 2.1 Technique A - Wasserstein Analysis
-* This workbook contains the code necessary to obtain the results of Technique A - Wasserstein Analysis.
-* Includes code for positive and negative error analysis. 
+## 2.1 Technique A - Wasserstein Analysis
+* This workbook contains the code necessary to perform Wasserstein Analysis.
+* It includes analyses of positive and negative error distributions across different demographic groups.
 
-### 2.2 Technique B - AUC Analysis
-* This workbook contains the code necessary to obtain the results of Technique B - AUC Analysis.
-* Includes code for Scenario 1, 2A, 2B.
+## 2.2 Technique B - AUC Analysis
+* This workbook contains the code necessary to compute AUC (Area Under the Curve) Analysis.
+* The analysis is structured into three different scenarios:
+   - Scenario 1
+   - Scenario 2A
+   - Scenario 2B
 
-### 2.3 Technique C - Error Variance Analysis
-* This workbook contains the code necessary to obtain the results of Technique C - Error Variance Analysis.
+## 2.3 Technique C - Error Variance Analysis
+* This workbook contains the code necessary to perform Error Variance Analysis
