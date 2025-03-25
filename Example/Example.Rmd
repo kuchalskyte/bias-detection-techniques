@@ -1,0 +1,133 @@
+---
+title: "Example Technique Usage"
+author: "Luka Kuchalskyte (s3983471)"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Before running this code, make sure to run the code of each technique in the Generalised File.
+
+# 1. Load Data
+
+```{r}
+install.packages("liver")
+library(liver)
+data(adult)
+
+# Load necessary package
+library(dplyr)
+
+# Filter the dataset to keep only "White" and "Black" races
+adult_filtered <- adult %>%
+  filter(race %in% c("White", "Black"))
+
+# View the filtered table
+table(adult_filtered$race)
+names(adult_filtered)
+
+# Modify the income variable to be 1 if income <= 50K, 0 if income > 50K
+adult_filtered$income <- ifelse(adult_filtered$income == "<=50K", 1, 0)
+
+# Modify the race variable to be 1 if race = "White", 0 if race = "Black"
+adult_filtered$race <- ifelse(adult_filtered$race == "White", 1, 0)
+
+# Modify the gender variable to be 1 if gender = "Male", 0 if race = "Female"
+adult_filtered$gender <- ifelse(adult_filtered$gender == "Male", 1, 0)
+```
+
+## 2. Technique Example Usage
+
+### 2.1 Technique A - Wasserstein Analysis
+
+```{r}
+group_combinations <- list(c("Female, Black", "Female, White"),
+                           c("Female, Black", "Male, Black"),
+                           c("Female, Black", "Male, White"),
+                           c("Female, White", "Male, Black"),
+                           c("Female, White", "Male, White"),
+                           c("Male, Black", "Male, White"))
+group_conditions <- list(list(c(0, 0), c(0, 1)),  # Female, Black vs Female, White
+                         list(c(0, 0), c(1, 0)),  # Female, Black vs Male, Black
+                         list(c(0, 0), c(1, 1)),  # Female, Black vs Male, White
+                         list(c(0, 1), c(1, 0)),  # Female, White vs Male, Black
+                         list(c(0, 1), c(1, 1)),  # Female, White vs Male, White
+                         list(c(1, 0), c(1, 1))) # Male, Black vs Male, White
+
+res_was <- wasserstein_analysis(data = adult_filtered,
+                                levels1 = c(0, 1),
+                                levels2 = c(0, 1),
+                                labels1 = c("Female", "Male"),
+                                labels2 = c("Black", "White"),
+                                group_combinations = group_combinations,
+                                group_conditions = group_conditions,
+                                variable1 = "gender",
+                                variable2 = "race",
+                                formula = "income ~ age + education.num + hours.per.week",
+                                response = "income")
+res_was$mean_auc
+res_was$AUC_result
+res_was$anova_result
+res_was$visualisation
+```
+
+### 2.2 Technique B - AUC Analysis
+
+```{r}
+# Scenario 1
+res_auc1 <- auc_anova_1(data = adult_filtered, variable1 = "gender",
+                         variable2 = "race", seed = 3983471,
+                         group1 = "Female", group2 = "Male",
+                         formula = "income ~ age + education.num + hours.per.week",
+                         response = "income", dist = 0.2)
+
+
+res_auc1$mean_auc
+res_auc1$AUC_result
+res_auc1$anova_result
+res_auc1$visualisation
+```
+
+```{r}
+# Scenario 2A
+res_auc2a <- auc_anova_2(data = adult_filtered, variable1 = "gender",
+                          variable2 = "race", seed = 3983471,
+                          group1 = "Female", group2 = "Male",
+                          formula = "income ~ age + education.num + hours.per.week",
+                          response = "income", dist = 0.2)
+
+res_auc2a$mean_auc
+res_auc2a$AUC_result
+res_auc2a$anova_result
+res_auc2a$visualisation
+```
+
+```{r}
+# Scenario 2B
+res_auc2b <- auc_anova_3(data = adult_filtered, variable1 = "gender",
+                          variable2 = "race", seed = 3983471,
+                          group1 = "Female", group2 = "Male",
+                          formula = "income ~ age + education.num + hours.per.week",
+                          response = "income", dist = 0.2)
+res_auc2b$mean_auc
+res_auc2b$AUC_result
+res_auc2b$anova_result
+res_auc2b$visualisation
+```
+
+### 2.3 Technique C - Error Variance Analysis
+
+```{r}
+res_er <- error_variance_analysis(data = adult_filtered, variable1 = "gender",
+                                  variable2 = "race", seed = 3983471,
+                                  group1 = "Female", group2 = "Male",
+                                  formula = "income ~ age + education.num + hours.per.week",
+                                  response = "income")
+res_er$variance_results
+res_er$summary_table
+res_er$anova_result
+res_er$visualisation
+```
