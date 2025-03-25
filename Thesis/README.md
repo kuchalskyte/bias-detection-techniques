@@ -10,16 +10,16 @@ This folder contains all the code necessary to replicate the analysis conducted 
 ## 2. Technique Workbooks
 Each technique is implemented in a separate workbook. These workbooks rely on the datasets produced by the Simulation Study and should only be run after the Simulation Study workbook has been executed.
 
-## 2.1 Technique A - Wasserstein Analysis
+### 2.1 Technique A - Wasserstein Analysis
 * This workbook contains the code necessary to perform Wasserstein Analysis.
 * It includes analyses of positive and negative error distributions across different demographic groups.
 
-## 2.2 Technique B - AUC Analysis
+### 2.2 Technique B - AUC Analysis
 * This workbook contains the code necessary to compute AUC (Area Under the Curve) Analysis.
 * The analysis is structured into three different scenarios:
    - Scenario 1
    - Scenario 2A
    - Scenario 2B
 
-## 2.3 Technique C - Error Variance Analysis
+### 2.3 Technique C - Error Variance Analysis
 * This workbook contains the code necessary to perform Error Variance Analysis
