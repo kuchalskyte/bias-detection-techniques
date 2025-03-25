@@ -1,0 +1,561 @@
+---
+title: "Generalised Technique B - AUC Analysis"
+author: "Luka Kuchalskyte (s3983471)"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Scenario 1
+
+**Scenario 1**: A model is trained on the full dataset, and predictions are made for both “Blue” and “Red” individuals separately. AUC is calculated for each group to assess predictive accuracy.
+
+This scenario involves evaluating the predictive performance of a model for two demographic groups ("Blue" and "Red") by calculating the Area Under the Curve (AUC) for each group. The analysis aims to assess whether there is a significant difference in the model's predictive accuracy between the two groups. This is particularly important for detecting bias in the model. By bootstrapping the analysis, we can quantify the variability in AUC values and formally test for differences between groups.
+
+1. Train the Model on the Full Dataset.
+  - A machine learning model (logistic regression) is trained on the entire dataset, which includes both "Blue" and "Red" individuals.
+  - The model uses income and education to predict the target variable (undesired outcome: 0 = desired, 1 = undesired).
+
+2. Stratified Predictions.
+  - Predictions are made for all individuals in the dataset.
+  - The dataset is split into two subgroups based on the sensitive characteristic "Colour":
+    * Group 1: Individuals with Colour = BLUE
+    * Group 2: Individuals with Colour = RED
+    
+3. AUC Calculation for Each Group.
+  - The AUC, a measure of predictive performance, is calculated separately for each group:
+    * AUC for "Blue" individuals (AUC BLUE)
+    * AUC for "Red" individuals (AUC RED)
+  - The AUC is a robust performance metric for binary classification models, as it evaluates the model's ability to distinguish between positive and negative outcomes, regardless of threshold.
+  
+4. Bootstrapping to Generate AUC Distributions.
+  - To assess the variability in AUC across the two groups, the process is repeated for n bootstrap samples:
+
+5. Comparing the AUC Distributions with an ANOVA.
+
+```{r}
+stratified_bootstrap <- function(data, variable1, 
+                                 variable2, n_resamples = 100, 
+                                 seed) {
+  
+  # In: data: A data frame containing the variables of interest;
+  #     variable1: A string indicating the first sensitive variable;
+  #     variable2: A string indicating the second sensitive variable;
+  #     n_resamples: The number of bootstrap resamples to generate;
+  #     seed: The random seed used for the sampling.
+  # Out:  A list of bootstrap samples maintaining the proportional representation of Colour and Disability.
+  
+  # Load relevant package
+  library(dplyr)
+  
+  # Set a seed for reproducability
+  set.seed(seed) 
+
+  # Calculate the original proportions of each demographic group
+  original_proportions <- data %>%
+    group_by(!!sym(variable1), !!sym(variable2)) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    mutate(proportion = n / sum(n))
+
+  # Initialize an empty list to store the bootstrap samples
+  bootstrap_samples <- list()
+
+  # Perform stratified bootstrapping
+  for (i in 1:n_resamples) {
+    
+    # Initialize an empty data frame for each bootstrap sample
+    bootstrap_sample <- data.frame()
+
+    # Resample within each demographic group to maintain group proportions
+    for (j in 1:nrow(original_proportions)) {
+      
+      # Filter data for the current group
+      group_data <- data %>%
+        filter(!!sym(variable1) == original_proportions[[variable1]][j],
+               !!sym(variable2) == original_proportions[[variable2]][j])
+
+      # Calculate the number of samples to draw from this group
+      n_samples <- round(original_proportions$proportion[j] * nrow(data))
+
+      # Draw a bootstrap sample from the group with replacement
+      group_resample <- group_data[sample(1:nrow(group_data), size = n_samples, 
+                                          replace = TRUE), ]
+
+      # Bind the resampled group data to the bootstrap sample
+      bootstrap_sample <- rbind(bootstrap_sample, group_resample)
+    }
+    
+    # Store the bootstrap sample in the list
+    bootstrap_samples[[i]] <- bootstrap_sample
+  }
+  
+  # Return the list of bootstrap samples
+  return(bootstrap_samples)
+}
+```
+
+```{r}
+# Function for Scenario 1: Train on Full dataset and Test on Blue/Red
+auc_anova_1 <- function(data, variable1, 
+                        variable2, n_resamples = 100, 
+                        seed, dist, formula, 
+                        group1, group2,
+                        family = binomial, response, type = "response") {
+  
+  #  In: data: The dataset used for bootstrapping and modeling;
+  #      variable1: A string indicating the first sensitive variable;
+  #      variable2: A string indicating the second sensitive variable;
+  #      n_resamples: Number of resamples for stratified bootstrapping (default = 100);
+  #      seed: Seed for reproducibility;
+  #      dist: Proportion for splitting data into train and test sets;
+  #      formula: A formula specifying the model;
+  #      group1: First class of variable1 = 0 (e.g. "Female");
+  #      group2: Second class of variable1 = 1 (e.g. "Male");
+  #      family: The family for the GLM model (default = binomial);
+  #      response: The name of the response variable as a string;
+  #      type: The type of prediction (default = "response").
+  # Out: A list containing the following elements:
+  #      - mean_auc: A summary data frame with mean AUC values for groups.
+  #      - AUC_result: A data frame in long format containing the AUC values 
+  #                    for each bootstrap iteration and each group.
+  #                    Columns include:
+  #                      * Bootstrap: The bootstrap iteration number.
+  #                      * Group: The group for which AUC is calculated.
+  #                      * AUC: The AUC value for that group in the given iteration.
+  #      - anova_result: The summary of an ANOVA test performed on the AUC values
+  #                      to assess whether there are significant differences 
+  #                      between the groups.
+  #      - visualisation: A ggplot2 density plot showing the distribution of AUC 
+  #                       values for the groups across all bootstrap samples.
+  
+  # Load necessary packages
+  library(dplyr)
+  library(pROC)
+  library(ggplot2)
+  library(kableExtra)  # For APA-style table formatting
+  library(viridis)
+  
+  # Generate n_bootstrap samples using the bootstrap function
+  bootstrap_samples <- stratified_bootstrap(data = data, 
+                                            variable1 = variable1, 
+                                            variable2 = variable2, 
+                                            n_resamples = n_resamples,
+                                            seed = seed)
+
+  # Initialize a data frame to store AUC results in long format
+  auc_results <- data.frame(Bootstrap = integer(n_resamples * 2), 
+                            Group = character(n_resamples * 2), 
+                            AUC = numeric(n_resamples * 2),
+                            stringsAsFactors = FALSE)  # Prevent factors
+  
+  # Loop through each bootstrap sample
+  for (i in 1:n_resamples) {
+    
+    # Get the current bootstrap sample
+    sample <- bootstrap_samples[[i]]
+    
+    # Split the bootstrap sample into train and test sets
+    set.seed(seed)
+    test.index <- sample(nrow(sample), nrow(sample) * dist) 
+    train <- sample[-test.index, ]
+    test <- sample[test.index, ]
+    
+    # Train the model on the training data
+    model <- glm(formula = formula, data = train, family = family)
+    
+    # Predict outcomes separately for groups
+    test_g1 <- test %>% filter(!!sym(variable1) == 0)
+    test_g2 <- test %>% filter(!!sym(variable1) == 1)
+
+    # Predict probabilities for groups
+    predictions_g1 <- predict(model, newdata = test_g1, type = "response")
+    predictions_g2 <- predict(model, newdata = test_g2, type = "response")
+    
+    # Calculate AUC for groups separately
+    auc_g1 <- if (nrow(test_g1) > 0) {
+      roc(test_g1[[response]], predictions_g1)$auc
+    } else NA
+
+    auc_g2 <- if (nrow(test_g2) > 0) {
+      roc(test_g2[[response]], predictions_g2)$auc
+    } else NA
+    
+    # Store results in long-format data frame
+    auc_results[(i-1)*2 + 1, ] <- c(i, group1, as.numeric(auc_g1))
+    auc_results[(i-1)*2 + 2, ] <- c(i, group2, as.numeric(auc_g2))
+  }
+
+  # Ensure AUC is numeric (in case of coercion issues)
+  auc_results$AUC <- as.numeric(auc_results$AUC)
+  
+  # Calculate Mean AUC values for each group
+  mean_auc <- auc_results %>%
+    group_by(Group) %>%
+    summarize(mean_AUC = mean(AUC, na.rm = TRUE), 
+              SD = sd(AUC, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(mean_AUC = sprintf("%.3f", mean_AUC),
+           SD = sprintf("%.3f", SD))
+  
+  # Format mean_auc as APA-style table
+  mean_auc_apa <- mean_auc %>%
+    kable(format = "html", col.names = c("Group", "Mean AUC", "SD"),
+          caption = "Mean AUC and Standard Deviation for Groups") %>%
+    kable_styling(full_width = FALSE, position = "center")
+  
+  # Perform ANOVA on AUC results to test if there are significant differences between groups
+  anova_model <- aov(AUC ~ Group, data = auc_results)
+  anova_summary <- summary(anova_model)
+  
+  # Format AUC results as APA-style table
+  auc_results_apa <- auc_results %>%
+    mutate(AUC = sprintf("%.3f", AUC)) %>%
+    kable(format = "html", col.names = c("Bootstrap Sample", "Group", "AUC"),
+          caption = "Bootstrap Results: AUC for Each Group") %>%
+    kable_styling(full_width = FALSE, position = "center")
+  
+  # Plot the AUC distributions for each  group
+  plot <- ggplot(auc_results, aes(x = AUC, fill = Group)) +
+    geom_density(alpha = 0.7) +  # Density plot with transparency
+    labs(title = "Density Plot of AUC Distributions by Group",
+         x = "AUC",
+         y = "Density",
+         caption = "Data represents bootstrap samples") +
+    theme_minimal() +  # Use a minimal theme for a clean look
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Use the "magma" palette from viridis
+    theme(plot.title = element_text(hjust = 0.5, size = 14),  # Center and style title
+          axis.title.x = element_text(size = 12),
+          axis.title.y = element_text(size = 12),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          legend.title = element_blank())  # Remove legend title for simplicity
+
+  # Return the auc results, anova results and visualisation
+  return(list(
+    mean_auc = mean_auc_apa,       # APA-formatted mean AUC table
+    AUC_result = auc_results_apa,  # APA-formatted bootstrap AUC table
+    anova_result = anova_summary,  # Summary of the ANOVA test
+    visualisation = plot))         # Density plot visualizing the AUC distribution for groups
+}
+```
+
+# 2. Scenario 2A
+
+**Scenario 2A**: A model is trained only on the first group and tested separately on both groups, with AUC calculated for each.
+
+```{r}
+# Function for Scenario 2A: Train on g1 and Test on g1/g2
+auc_anova_2 <- function(data, variable1, variable2, 
+                        n_resamples = 100, seed, dist = 0.2, 
+                        group1, group2,
+                        formula, family = binomial, response) {
+  
+  # In: data: The dataset used for bootstrapping and modeling;
+  #      variable1: A string indicating the first categorical variable;
+  #      variable2: A string indicating the second categorical variable;
+  #      n_resamples: Number of resamples for stratified bootstrapping (default = 100);
+  #      seed: Seed for reproducibility;
+  #      dist: Proportion for splitting data into train and test sets (default = 0.2);
+  #      group1: First class of variable1 = 0 (e.g. "Female");
+  #      group2: Second class of variable1 = 1 (e.g. "Male");
+  #      formula: A formula specifying the model;
+  #      family: The family for the GLM model (default = binomial);
+  #      response: The name of the response variable as a string.
+  # Out: A list containing the following elements:
+  #      - mean_auc: A data frame summarizing the mean AUC values for each train-test scenario.
+  #                 * train_color: The group on which the model was trained (e.g., "Blue").
+  #                 * test_color: The group on which the model was tested (e.g., "Blue" or "Red").
+  #                 * mean_auc: The average AUC across all bootstrap iterations for the given scenario.
+  #      - AUC_result: A data frame in long format containing the AUC values 
+  #                    for each bootstrap iteration and each group (Blue and Red).
+  #                    Columns include:
+  #                  * Bootstrap: The bootstrap iteration number.
+  #                  * Group: The group (Blue or Red) for which AUC is calculated.
+  #                  * AUC: The AUC value for that group in the given iteration.
+  #      - anova_result: The summary of an ANOVA test performed on the AUC values
+  #                      to assess whether there are significant differences 
+  #                      between the Blue and Red groups.
+  #      - visualisation: A ggplot2 density plot visualizing the distribution of AUC values 
+  #                       for each train-test scenario ("Blue on Blue" and "Blue on Red"). 
+  
+  # Load required packages
+  library(dplyr)
+  library(pROC)
+  library(ggplot2)
+  library(kableExtra)  # For APA-style table formatting
+  library(viridis)
+  
+  # Generate n_bootstrap samples using the bootstrap function
+  bootstrap_samples <- stratified_bootstrap(data = data, 
+                                            variable1 = variable1, 
+                                            variable2 = variable2, 
+                                            n_resamples = n_resamples,
+                                            seed = seed)
+  
+  # Initialize a data frame to store AUC results in long format
+  auc_results <- data.frame(Bootstrap = integer(), 
+                            Train_Group = character(), 
+                            Test_Group = character(), 
+                            AUC = numeric())
+
+  # Loop through each bootstrap sample
+  for (i in 1:n_resamples) {
+    
+    # Get the current bootstrap sample
+    sample <- bootstrap_samples[[i]]
+    
+    # Split the bootstrap sample into train and test sets
+    set.seed(seed)
+    test.index <- sample(nrow(sample), nrow(sample) * dist) 
+    train <- sample[-test.index, ]
+    test <- sample[test.index, ]
+
+    # Train on the group1 
+    g1_train <- train %>% filter(!!sym(variable1) == 0)  # Filter rows where variable1 = 0
+    if (nrow(g1_train) > 0) {
+    
+      # Train a GLM model on the group1 training set
+      g1_model <- glm(formula = formula, data = g1_train, family = family)
+
+      # Test on group1 group
+      test_g1 <- test %>% filter(!!sym(variable1) == 0)
+      if (nrow(test_g1) > 0) {
+        # Predict probabilities and calculate AUC
+        test_g1$predicted_prob <- predict(g1_model, newdata = test_g1, type = "response")
+        auc_g1_test <- roc(test_g1[[response]], test_g1$predicted_prob)$auc
+        
+        # Store the result
+        auc_results <- rbind(auc_results, data.frame(Bootstrap = i, 
+                                                     Train_Group = group1, 
+                                                     Test_Group = group1, 
+                                                     AUC = as.numeric(auc_g1_test)))
+      }
+
+      # Test on group2 group
+      test_g2 <- test %>% filter(!!sym(variable1) == 1)  # Filter rows where variable1 = 1
+      if (nrow(test_g2) > 0) {
+        # Predict probabilities and calculate AUC
+        test_g2$predicted_prob <- predict(g1_model, newdata = test_g2, type = "response")
+        auc_g2_test <- roc(test_g2[[response]], test_g2$predicted_prob)$auc
+        
+        # Store the result
+        auc_results <- rbind(auc_results, data.frame(Bootstrap = i, 
+                                                     Train_Group = group1, 
+                                                     Test_Group = group2, 
+                                                     AUC = as.numeric(auc_g2_test)))
+      }
+    }
+  }
+
+  # Calculate Mean AUC values
+  mean_auc <- auc_results %>%
+    group_by(Train_Group, Test_Group) %>%
+    summarize(mean_AUC = mean(AUC, na.rm = TRUE), 
+              SD = sd(AUC, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(mean_AUC = sprintf("%.3f", mean_AUC),
+           SD = sprintf("%.3f", SD))
+  
+  # Format mean_auc as APA-style table
+  mean_auc_apa <- mean_auc %>%
+    kable(format = "html", col.names = c("Train Group", "Test Group", "Mean AUC", "SD"),
+          caption = "Mean AUC and Standard Deviation for Train-Test Scenarios") %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  # Perform ANOVA on AUC results
+  anova_model <- aov(AUC ~ Test_Group, data = auc_results)
+  anova_summary <- summary(anova_model)
+  
+  # Format AUC results as APA-style table
+  auc_results_apa <- auc_results %>%
+    mutate(AUC = sprintf("%.3f", AUC)) %>%
+    kable(format = "html", col.names = c("Bootstrap Sample", "Train Group", "Test Group", "AUC"),
+          caption = "Bootstrap Results: AUC for Each Train-Test Scenario") %>%
+    kable_styling(full_width = FALSE, position = "center")
+  
+  # Plot AUC distributions
+  plot <- ggplot(auc_results, aes(x = AUC, fill = Test_Group)) +
+    geom_density(alpha = 0.7) +  # Density plot with transparency
+    labs(title = "Density Plot of AUC Distributions for Train-Test Scenarios",
+         x = "AUC",
+         y = "Density",
+         caption = "Data represents bootstrap samples") +
+    theme_minimal() +  # Use a minimal theme for a clean look
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Use the "magma" palette from viridis
+    theme(plot.title = element_text(hjust = 0.5, size = 14),  # Center and style title
+          axis.title.x = element_text(size = 12),
+          axis.title.y = element_text(size = 12),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          legend.title = element_blank())  # Remove legend title for simplicity
+  
+  # Return results
+  return(list(
+    mean_auc = mean_auc_apa,       # APA-formatted mean AUC table
+    AUC_result = auc_results_apa,  # APA-formatted bootstrap AUC table
+    anova_result = anova_summary,  # Summary of the ANOVA test
+    visualisation = plot))         # Density plot visualizing the AUC distribution
+}
+```
+
+# 3. Scenario 2B
+
+**Scenario 2B**: A model is trained only on the second group and tested separately on both groups, with AUC calculated for each.
+
+```{r}
+# Function for Scenario 2B: Train on g2 and Test on g1/g2
+auc_anova_3 <- function(data, variable1, variable2, 
+                        n_resamples = 100, seed, dist = 0.2, 
+                        group1, group2,
+                        formula, family = binomial, response) {
+  
+  # In: data: The dataset used for bootstrapping and modeling;
+  #      variable1: A string indicating the first categorical variable;
+  #      variable2: A string indicating the second categorical variable;
+  #      n_resamples: Number of resamples for stratified bootstrapping (default = 100);
+  #      seed: Seed for reproducibility;
+  #      dist: Proportion for splitting data into train and test sets (default = 0.2);
+  #      group1: First class of variable1 = 0 (e.g. "Female");
+  #      group2: Second class of variable1 = 1 (e.g. "Male");
+  #      formula: A formula specifying the model;
+  #      family: The family for the GLM model (default = binomial);
+  #      response: The name of the response variable as a string.
+  # Out: A list containing the following elements:
+  #      - mean_auc: A data frame summarizing the mean AUC values for each train-test scenario.
+  #                 * train_color: The group on which the model was trained (e.g., "Blue").
+  #                 * test_color: The group on which the model was tested (e.g., "Blue" or "Red").
+  #                 * mean_auc: The average AUC across all bootstrap iterations for the given scenario.
+  #      - AUC_result: A data frame in long format containing the AUC values 
+  #                    for each bootstrap iteration and each group (Blue and Red).
+  #                    Columns include:
+  #                  * Bootstrap: The bootstrap iteration number.
+  #                  * Group: The group (Blue or Red) for which AUC is calculated.
+  #                  * AUC: The AUC value for that group in the given iteration.
+  #      - anova_result: The summary of an ANOVA test performed on the AUC values
+  #                      to assess whether there are significant differences 
+  #                      between the Blue and Red groups.
+  #      - visualisation: A ggplot2 density plot visualizing the distribution of AUC values 
+  #                       for each train-test scenario ("Blue on Blue" and "Blue on Red"). 
+  
+  # Load required packages
+  library(dplyr)
+  library(pROC)
+  library(ggplot2)
+  library(kableExtra)  # For APA-style table formatting
+  library(viridis)
+  
+  # Generate n_bootstrap samples using the bootstrap function
+  bootstrap_samples <- stratified_bootstrap(data = data, 
+                                            variable1 = variable1, 
+                                            variable2 = variable2, 
+                                            n_resamples = n_resamples,
+                                            seed = seed)
+  
+  # Initialize a data frame to store AUC results in long format
+  auc_results <- data.frame(Bootstrap = integer(), 
+                            Train_Group = character(), 
+                            Test_Group = character(), 
+                            AUC = numeric())
+
+  # Loop through each bootstrap sample
+  for (i in 1:n_resamples) {
+    
+    # Get the current bootstrap sample
+    sample <- bootstrap_samples[[i]]
+    
+    # Split the bootstrap sample into train and test sets
+    set.seed(seed)
+    test.index <- sample(nrow(sample), nrow(sample) * dist) 
+    train <- sample[-test.index, ]
+    test <- sample[test.index, ]
+
+    # Train on the group2 
+    g2_train <- train %>% filter(!!sym(variable1) == 1)  # Filter rows where variable1 = 1
+    if (nrow(g2_train) > 0) {
+    
+      # Train a GLM model on the group2 training set
+      g2_model <- glm(formula = formula, data = g2_train, family = family)
+
+      # Test on group2 group
+      test_g2 <- test %>% filter(!!sym(variable1) == 1)
+      if (nrow(test_g2) > 0) {
+        # Predict probabilities and calculate AUC
+        test_g2$predicted_prob <- predict(g2_model, newdata = test_g2, type = "response")
+        auc_g2_test <- roc(test_g2[[response]], test_g2$predicted_prob)$auc
+        
+        # Store the result
+        auc_results <- rbind(auc_results, data.frame(Bootstrap = i, 
+                                                     Train_Group = group2, 
+                                                     Test_Group = group2, 
+                                                     AUC = as.numeric(auc_g2_test)))
+      }
+
+      # Test on group1 group
+      test_g1 <- test %>% filter(!!sym(variable1) == 0)  # Filter rows where variable1 = 0
+      if (nrow(test_g1) > 0) {
+        # Predict probabilities and calculate AUC
+        test_g1$predicted_prob <- predict(g2_model, newdata = test_g1, type = "response")
+        auc_g1_test <- roc(test_g1[[response]], test_g1$predicted_prob)$auc
+        
+        # Store the result
+        auc_results <- rbind(auc_results, data.frame(Bootstrap = i, 
+                                                     Train_Group = group2, 
+                                                     Test_Group = group1, 
+                                                     AUC = as.numeric(auc_g1_test)))
+      }
+    }
+  }
+
+  # Calculate Mean AUC values
+  mean_auc <- auc_results %>%
+    group_by(Train_Group, Test_Group) %>%
+    summarize(mean_AUC = mean(AUC, na.rm = TRUE), 
+              SD = sd(AUC, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(mean_AUC = sprintf("%.3f", mean_AUC),
+           SD = sprintf("%.3f", SD))
+  
+  # Format mean_auc as APA-style table
+  mean_auc_apa <- mean_auc %>%
+    kable(format = "html", col.names = c("Train Group", "Test Group", "Mean AUC", "SD"),
+          caption = "Mean AUC and Standard Deviation for Train-Test Scenarios") %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  # Perform ANOVA on AUC results
+  anova_model <- aov(AUC ~ Test_Group, data = auc_results)
+  anova_summary <- summary(anova_model)
+  
+  # Format AUC results as APA-style table
+  auc_results_apa <- auc_results %>%
+    mutate(AUC = sprintf("%.3f", AUC)) %>%
+    kable(format = "html", col.names = c("Bootstrap Sample", "Train Group", "Test Group", "AUC"),
+          caption = "Bootstrap Results: AUC for Each Train-Test Scenario") %>%
+    kable_styling(full_width = FALSE, position = "center")
+  
+  # Plot AUC distributions
+  plot <- ggplot(auc_results, aes(x = AUC, fill = Test_Group)) +
+    geom_density(alpha = 0.7) +  # Density plot with transparency
+    labs(title = "Density Plot of AUC Distributions for Train-Test Scenarios",
+         x = "AUC",
+         y = "Density",
+         caption = "Data represents bootstrap samples") +
+    theme_minimal() +  # Use a minimal theme for a clean look
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Use the "magma" palette from viridis
+    theme(plot.title = element_text(hjust = 0.5, size = 14),  # Center and style title
+          axis.title.x = element_text(size = 12),
+          axis.title.y = element_text(size = 12),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          legend.title = element_blank())  # Remove legend title for simplicity
+  
+  # Return results
+  return(list(
+    mean_auc = mean_auc_apa,       # APA-formatted mean AUC table
+    AUC_result = auc_results_apa,  # APA-formatted bootstrap AUC table
+    anova_result = anova_summary,  # Summary of the ANOVA test
+    visualisation = plot))         # Density plot visualizing the AUC distribution
+}
+```
