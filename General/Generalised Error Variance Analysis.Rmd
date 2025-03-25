@@ -1,0 +1,191 @@
+---
+title: "Generalised Technique C - Error Variance Analysis"
+author: "Luka Kuchalskyte (s3983471)"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Error Variance Analysis
+
+This bias detection method aims to identify disparities in error variance between different demographic groups, such as BLUE and RED individuals, to determine if the model's predictions are disproportionately impacting one group over the other.
+
+1. **Stratified Bootstrapping**: Stratified bootstrapping ensures that each bootstrap sample maintains the same demographic composition, i.e., the proportion of RED and BLUE individuals is consistent across all samples. This helps maintain the diversity of the sample, making it more representative of the target population. N bootstrapped samples are generate, each with a demographic distribution matching the original simulated society, to simulate the variability that would occur in real-world scenarios where demographic makeup can shift.
+2. **Model Training and Prediction**: A machine learning model is trained using the full sample (across all demographic groups). After training the model, predictions are made for each individual in the sample. The error is calculated as the difference between the actual outcome (ground truth) and the predicted value (Outcome - Prediction).
+3. **Group-Based Error Variance Calculation**: The population is split into two groups based on their demographic characteristic (e.g., BLUE and RED individuals). This split allows us to examine whether the model’s errors are distributed equally across groups or if one group experiences larger errors (i.e., more variance). For each bootstrap sample, the variance of the errors is calculated separately for RED and BLUE individuals. This measures how spread out the errors are within each group. High variance in error rates may indicate that the model is less accurate or consistent for that group. This process is repeated for each bootstrap sample to account for random fluctuations and to ensure robustness in the error variance measurements.
+4. **Statistical Analysis - ANOVA**: To formally compare the error variances between RED and BLUE individuals, an Analysis of Variance (ANOVA) test is applied. The ANOVA tests whether the differences in error variances between the two groups are statistically significant. A significant F-value would indicate that the model is treating the two demographic groups differently, with one group possibly facing higher prediction errors.
+5. **Visualization - Heatmap of F-values**: A heatmap is generated to visualize the relationship between bias levels and the disparity in error variances across the two groups. The x-axis represents varying levels of bias introduced in the simulation (e.g., changes in income distribution between RED and BLUE individuals), while the y-axis shows the F-values from the ANOVA test. As bias increases in the simulated society (e.g., RED individuals are systematically disadvantaged in terms of income), the F-values from the ANOVA test are expected to increase. This increase indicates that larger error variances are emerging between the groups, signaling greater bias. A higher F-value suggests that the model's performance is more disparate across the two groups, with one group potentially suffering from higher prediction errors than the other.
+
+```{r}
+stratified_bootstrap <- function(data, variable1, 
+                                 variable2, n_resamples = 100, 
+                                 seed) {
+  
+  # In: data: A data frame containing the variables of interest;
+  #     variable1: A string indicating the first sensitive variable;
+  #     variable2: A string indicating the second sensitive variable;
+  #     n_resamples: The number of bootstrap resamples to generate;
+  #     seed: The random seed used for the sampling.
+  # Out:  A list of bootstrap samples maintaining the proportional representation of Colour and Disability.
+  
+  # Load relevant package
+  library(dplyr)
+  
+  # Set a seed for reproducability
+  set.seed(seed) 
+
+  # Calculate the original proportions of each demographic group
+  original_proportions <- data %>%
+    group_by(!!sym(variable1), !!sym(variable2)) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    mutate(proportion = n / sum(n))
+
+  # Initialize an empty list to store the bootstrap samples
+  bootstrap_samples <- list()
+
+  # Perform stratified bootstrapping
+  for (i in 1:n_resamples) {
+    
+    # Initialize an empty data frame for each bootstrap sample
+    bootstrap_sample <- data.frame()
+
+    # Resample within each demographic group to maintain group proportions
+    for (j in 1:nrow(original_proportions)) {
+      
+      # Filter data for the current group
+      group_data <- data %>%
+        filter(!!sym(variable1) == original_proportions[[variable1]][j],
+               !!sym(variable2) == original_proportions[[variable2]][j])
+
+      # Calculate the number of samples to draw from this group
+      n_samples <- round(original_proportions$proportion[j] * nrow(data))
+
+      # Draw a bootstrap sample from the group with replacement
+      group_resample <- group_data[sample(1:nrow(group_data), size = n_samples, 
+                                          replace = TRUE), ]
+
+      # Bind the resampled group data to the bootstrap sample
+      bootstrap_sample <- rbind(bootstrap_sample, group_resample)
+    }
+    
+    # Store the bootstrap sample in the list
+    bootstrap_samples[[i]] <- bootstrap_sample
+  }
+  
+  # Return the list of bootstrap samples
+  return(bootstrap_samples)
+}
+```
+
+```{r}
+# Function to calculate prediction errors and perform ANOVA on variances
+error_variance_analysis <- function(data, variable1, variable2, 
+                                    n_resamples = 100, seed, formula, 
+                                    group1, group2,
+                                    family = binomial, response, type = "response") {
+  
+  # In: data: The dataset used for bootstrapping and modeling;
+  #     variable1: A string indicating the sensitive variable;
+  #     variable2: A string indicating the sensitive variable;
+  #     n_resamples: Number of resamples for stratified bootstrapping (default = 100);
+  #     seed: Seed for reproducibility;
+  #     formula: A formula specifying the model;
+  #      group1: First class of variable1 = 0 (e.g. "Female");
+  #      group2: Second class of variable1 = 1 (e.g. "Male");
+  #     family: The family for the GLM model (default = binomial);
+  #     response: The name of the response variable as a string (default = "Outcome");
+  #     type: The type of prediction (default = "response").
+  # Out: ANOVA results comparing error variances for RED and BLUE individuals.
+  
+  # Load required packages
+  library(ggplot2)
+  library(dplyr)
+  library(knitr)
+  library(kableExtra)
+  
+  # Generate bootstrap samples
+  bootstrap_samples <- stratified_bootstrap(data = data, 
+                                            variable1 = variable1, 
+                                            variable2 = variable2, 
+                                            n_resamples = n_resamples,
+                                            seed = seed)
+
+  # Initialize a data frame to store error variance results
+  variance_results <- data.frame(Bootstrap = integer(), Group = character(), 
+                                 Error_Variance = numeric())
+
+  # Loop through each bootstrap sample
+  for (i in 1:length(bootstrap_samples)) {
+    
+    # Get the current bootstrap sample
+    sample <- bootstrap_samples[[i]]
+    
+    # Train the model 
+    model <- glm(formula = formula,
+                 data = sample,
+                 family = family)
+    
+    # Get predictions
+    pred <- predict(object = model,
+                    newdata = sample,
+                    type = type)  
+    
+    # Calculate errors (Outcome - Prediction)
+    sample$Error <- sample[[response]] - pred
+    
+    # Calculate error variance for each group (e.g., Colour)
+    for (group in unique(sample[[variable1]])) {
+      group_data <- sample %>% filter(!!sym(variable1) == group)
+      error_variance <- var(group_data$Error)  # Variance of errors for each group
+      
+      # Store the error variance results
+      variance_results <- variance_results %>%
+        add_row(Bootstrap = i, 
+                Group = as.character(group), 
+                Error_Variance = error_variance)
+    }
+  }
+
+  variance_results$Group <- ifelse(variance_results$Group == 0, group2, group1)
+  
+  # Perform ANOVA to compare error variances between groups
+  anova_result <- aov(Error_Variance ~ Group, data = variance_results)
+  
+  # APA-style table for error variances (mean and SD)
+  apa_summary <- variance_results %>%
+    group_by(Group) %>%
+    summarise("Mean Variance" = mean(Error_Variance),
+              SD  = sd(Error_Variance)) %>%
+    kable(format = "html", caption = "Mean and SD of Error Variances by Group") %>%
+    kable_styling(full_width = FALSE, position = "center")
+  
+  # APA-style full variance results table
+  apa_variance_table <- variance_results %>%
+    kable(format = "html", caption = "Error Variance Results by Bootstrap and Group") %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  # Create a boxplot of prediction error variances by group
+  p <- ggplot(variance_results, aes(x = Error_Variance, fill = Group)) +
+    geom_boxplot(alpha = 0.7) +  # Density plot with transparency
+    labs(title = "Prediction Error Variances by Group",
+         x = "Error Variance",
+         y = "Density",
+         caption = "Data represents bootstrap samples") +
+    theme_minimal() +  # Use a minimal theme for a clean look
+    scale_fill_viridis_d(option = "magma", begin = 0.2, end = 0.8) +  # Use the "magma" palette from viridis
+    theme(plot.title = element_text(hjust = 0.5, size = 16),  # Center and style title
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          legend.title = element_blank())  # Remove legend title for simplicity
+
+  return(list(variance_results = apa_variance_table,  # APA-style variance results table
+              summary_table = apa_summary,          # APA-style mean and SD table
+              anova_result = summary(anova_result), # ANOVA results
+              visualisation = p))                   # Visualization
+}
+```
