@@ -1,9 +1,9 @@
 # Thesis Study - Code Documentation
 
-This folder contains all the code necessary to replicate the analysis conducted in my thesis study. The workflow consists of two main parts: the Simulation Study, which generates the synthetic societies, and the Technique Workbooks, which apply different bias detection techniques to the simulated data.
+This folder contains all the code necessary to replicate the analysis conducted in my thesis study (Navigating Bias: A Comparative Analysis of Bias Detection Techniques in Machine Learning Algorithms). The workflow consists of two main parts: the Simulation Study, which generates the synthetic societies, and the Technique Workbooks, which apply different bias detection techniques to the simulated data.
 
 ## 1. Simulation Study
-* This workbook contains all the code required to generate the societies analyzed in the thesis.
+* This workbook contains all the code required to generate the societies analyzed in the thesis (Navigating Bias: A Comparative Analysis of Bias Detection Techniques in Machine Learning Algorithms).
 * It must be run first before executing any of the technique workbooks.
 * Running this workbook will generate the necessary datasets that the subsequent workbooks depend on.
 
